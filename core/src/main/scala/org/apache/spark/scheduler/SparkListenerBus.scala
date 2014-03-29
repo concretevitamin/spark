@@ -33,6 +33,9 @@ private[spark] class SparkListenerBus extends Logging {
   private val eventQueue = new LinkedBlockingQueue[SparkListenerEvents](EVENT_QUEUE_CAPACITY)
   private var queueFullErrorMessageLogged = false
 
+  private var drained = false
+  private val drainedLock = new Object()
+
   // Create a new daemon thread to listen for events. This thread is stopped when it receives
   // a SparkListenerShutdown event, using the stop method.
   new Thread("SparkListenerBus") {
@@ -56,6 +59,10 @@ private[spark] class SparkListenerBus extends Logging {
           case taskEnd: SparkListenerTaskEnd =>
             sparkListeners.foreach(_.onTaskEnd(taskEnd))
           case SparkListenerShutdown =>
+            drainedLock.synchronized {
+              drained = true
+              drainedLock.notify()
+            }
             // Get out of the while loop and shutdown the daemon thread
             return
           case _ =>
@@ -96,5 +103,17 @@ private[spark] class SparkListenerBus extends Logging {
     true
   }
 
-  def stop(): Unit = post(SparkListenerShutdown)
+  def stop(): Unit = {
+    if (!started) {
+      throw new IllegalStateException("Attempted to stop a listener bus that has not yet started!")
+    }
+    drainedLock.synchronized {
+      // put post() and wait() in the same synchronized block to ensure wait() happens before
+      // notify()
+      post(SparkListenerShutdown)
+      while (!drained) {
+        drainedLock.wait()
+      }
+    }
+  }
 }
