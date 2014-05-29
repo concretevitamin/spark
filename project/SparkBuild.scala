@@ -162,6 +162,7 @@ object SparkBuild extends Build {
     Seq[ProjectReference](examples, tools, assemblyProj) ++ maybeJava8Tests
 
   def sharedSettings = Defaults.defaultSettings ++ MimaBuild.mimaSettings(file(sparkHome)) ++ Seq(
+    publishArtifact in (Compile, packageDoc) := false,
     organization       := "org.apache.spark",
     version            := SPARK_VERSION,
     scalaVersion       := "2.10.4",
@@ -185,6 +186,7 @@ object SparkBuild extends Build {
     javaOptions in Test ++= System.getProperties.filter(_._1 startsWith "spark").map { case (k,v) => s"-D$k=$v" }.toSeq,
     javaOptions in Test ++= "-Xmx3g -XX:PermSize=128M -XX:MaxNewSize=256m -XX:MaxPermSize=1g".split(" ").toSeq,
     javaOptions += "-Xmx3g",
+    javaOptions += "-XX:MaxPermSize=1G",
     // Show full stack trace and duration in test cases.
     testOptions in Test += Tests.Argument("-oDF"),
     // Remove certain packages from Scaladoc
@@ -472,6 +474,9 @@ object SparkBuild extends Build {
     // assumptions about the the expression ids being contiguous.  Running tests in parallel breaks
     // this non-deterministically.  TODO: FIX THIS.
     parallelExecution in Test := false,
+    addCompilerPlugin("org.scalamacros" % "paradise" % "2.0.0-M8" cross CrossVersion.full),
+    libraryDependencies <+= scalaVersion(v => "org.scala-lang"  % "scala-compiler" % v ),
+    libraryDependencies += "org.scalamacros" %% "quasiquotes" % "2.0.0-M8",
     libraryDependencies ++= Seq(
       "org.scalatest" %% "scalatest" % "1.9.1" % "test",
       "com.typesafe" %% "scalalogging-slf4j" % "1.0.1"

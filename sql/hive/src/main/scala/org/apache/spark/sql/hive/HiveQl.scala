@@ -779,6 +779,7 @@ private[hive] object HiveQl {
 
   /* Case insensitive matches */
   val COUNT = "(?i)COUNT".r
+  val SUBSTR = "(?i)SUBSTR".r
   val AVG = "(?i)AVG".r
   val SUM = "(?i)SUM".r
   val RAND = "(?i)RAND".r
@@ -870,13 +871,14 @@ private[hive] object HiveQl {
       IsNull(nodeToExpr(child))
     case Token("TOK_FUNCTION", Token("IN", Nil) :: value :: list) =>
       In(nodeToExpr(value), list.map(nodeToExpr))
+    case Token("TOK_FUNCTION", Token(SUBSTR(), Nil) :: str :: start :: end :: Nil) =>
+      SubString(nodeToExpr(str), nodeToExpr(start), nodeToExpr(end))
     case Token("TOK_FUNCTION",
            Token("between", Nil) ::
            Token("KW_FALSE", Nil) ::
            target ::
            minValue ::
            maxValue :: Nil) =>
-
       val targetExpression = nodeToExpr(target)
       And(
         GreaterThanOrEqual(targetExpression, nodeToExpr(minValue)),

@@ -15,7 +15,8 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.execution
+package org.apache.spark.sql
+package execution
 
 import scala.collection.mutable.{ArrayBuffer, BitSet}
 
@@ -63,9 +64,9 @@ case class HashJoin(
 
   def output = left.output ++ right.output
 
-  @transient lazy val buildSideKeyGenerator = new Projection(buildKeys, buildPlan.output)
+  @transient lazy val buildSideKeyGenerator = GenerateProjection(buildKeys, buildPlan.output)
   @transient lazy val streamSideKeyGenerator =
-    () => new MutableProjection(streamedKeys, streamedPlan.output)
+    GenerateMutableProjection(streamedKeys, streamedPlan.output)
 
   def execute() = {
 

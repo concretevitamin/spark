@@ -78,11 +78,11 @@ private[sql] abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
              partialEvaluations.values.flatMap(_.partialEvaluations)).toSeq
 
           // Construct two phased aggregation.
-          execution.Aggregate(
+          execution.HashAggregate(
             partial = false,
             namedGroupingExpressions.values.map(_.toAttribute).toSeq,
             rewrittenAggregateExpressions,
-            execution.Aggregate(
+            execution.HashAggregate(
               partial = true,
               groupingExpressions,
               partialComputation,
@@ -116,12 +116,6 @@ private[sql] abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
 
   protected lazy val singleRowRdd =
     sparkContext.parallelize(Seq(new GenericRow(Array[Any]()): Row), 1)
-
-  def convertToCatalyst(a: Any): Any = a match {
-    case s: Seq[Any] => s.map(convertToCatalyst)
-    case p: Product => new GenericRow(p.productIterator.map(convertToCatalyst).toArray)
-    case other => other
-  }
 
   object TakeOrdered extends Strategy {
     def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
@@ -181,7 +175,7 @@ private[sql] abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
     val numPartitions = 200
     def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
       case logical.Distinct(child) =>
-        execution.Aggregate(
+        execution.HashAggregate(
           partial = false, child.output, child.output, planLater(child))(sparkContext) :: Nil
       case logical.Sort(sortExprs, child) =>
         // This sort is a global sort. Its requiredDistribution will be an OrderedDistribution.
@@ -195,14 +189,13 @@ private[sql] abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
       case logical.Filter(condition, child) =>
         execution.Filter(condition, planLater(child)) :: Nil
       case logical.Aggregate(group, agg, child) =>
-        execution.Aggregate(partial = false, group, agg, planLater(child))(sparkContext) :: Nil
+        execution.HashAggregate(partial = false, group, agg, planLater(child))(sparkContext) :: Nil
       case logical.Sample(fraction, withReplacement, seed, child) =>
         execution.Sample(fraction, withReplacement, seed, planLater(child)) :: Nil
       case logical.LocalRelation(output, data) =>
-        val dataAsRdd =
-          sparkContext.parallelize(data.map(r =>
-            new GenericRow(r.productIterator.map(convertToCatalyst).toArray): Row))
-        execution.ExistingRdd(output, dataAsRdd) :: Nil
+        ExistingRdd(
+          output,
+          ExistingRdd.productToRowRdd(sparkContext.parallelize(data, numPartitions))) :: Nil
       case logical.Limit(IntegerLiteral(limit), child) =>
         execution.Limit(limit, planLater(child))(sparkContext) :: Nil
       case Unions(unionChildren) =>

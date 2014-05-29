@@ -40,7 +40,7 @@ class PlannerSuite extends FunSuite {
   test("count is partially aggregated") {
     val query = testData.groupBy('value)(Count('key)).queryExecution.analyzed
     val planned = PartialAggregation(query).head
-    val aggregations = planned.collect { case a: Aggregate => a }
+    val aggregations = planned.collect { case a: HashAggregate => a }
 
     assert(aggregations.size === 2)
   }

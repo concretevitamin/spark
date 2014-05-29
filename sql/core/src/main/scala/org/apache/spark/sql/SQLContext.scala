@@ -89,6 +89,10 @@ class SQLContext(@transient val sparkContext: SparkContext)
   implicit def createSchemaRDD[A <: Product: TypeTag](rdd: RDD[A]) =
     new SchemaRDD(this, SparkLogicalPlan(ExistingRdd.fromProductRdd(rdd)))
 
+  implicit def createAnonSchemaRDD[A <: AnonymousRow : TypeTag](rdd: RDD[A]): SchemaRDD =
+    // TODO: Will fail for empty RDDs, is not efficient...
+    new SchemaRDD(this, SparkLogicalPlan(ExistingRdd(rdd.take(1).head.schema, rdd.asInstanceOf[RDD[Row]])))
+
   /**
    * Loads a Parquet file, returning the result as a [[SchemaRDD]].
    *
@@ -256,9 +260,11 @@ class SQLContext(@transient val sparkContext: SparkContext)
   }
 
   /**
+   * :: DeveloperApi ::
    * The primary workflow for executing relational queries using Spark.  Designed to allow easy
    * access to the intermediate phases of query execution for developers.
    */
+  @DeveloperApi
   protected abstract class QueryExecution {
     def logical: LogicalPlan
 

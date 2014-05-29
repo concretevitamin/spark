@@ -29,7 +29,11 @@ import org.apache.spark.sql.catalyst.dsl.expressions._
 class ExpressionEvaluationSuite extends FunSuite {
 
   test("literals") {
-    assert((Literal(1) + Literal(1)).eval(null) === 2)
+    checkEvaluation(Literal(1), 1)
+    checkEvaluation(Literal(true), true)
+    checkEvaluation(Literal(0L), 0L)
+    checkEvaluation(Literal("test"), "test")
+    checkEvaluation(Literal(1) + Literal(1), 2)
   }
 
   /**
@@ -61,10 +65,8 @@ class ExpressionEvaluationSuite extends FunSuite {
   test("3VL Not") {
     notTrueTable.foreach {
       case (v, answer) =>
-        val expr = ! Literal(v, BooleanType)
-        val result = expr.eval(null)
-        if (result != answer)
-          fail(s"$expr should not evaluate to $result, expected: $answer")    }
+        checkEvaluation(!Literal(v, BooleanType), answer)
+    }
   }
 
   booleanLogicTest("AND", _ && _,
@@ -232,21 +234,21 @@ class ExpressionEvaluationSuite extends FunSuite {
     checkEvaluation(Literal(false) cast IntegerType, 0)
     checkEvaluation(Cast(Literal(1) cast BooleanType, IntegerType), 1)
     checkEvaluation(Cast(Literal(0) cast BooleanType, IntegerType), 0)
-    checkEvaluation("23" cast DoubleType, 23)
+    checkEvaluation("23" cast DoubleType, 23d)
     checkEvaluation("23" cast IntegerType, 23)
-    checkEvaluation("23" cast FloatType, 23)
-    checkEvaluation("23" cast DecimalType, 23)
-    checkEvaluation("23" cast ByteType, 23)
-    checkEvaluation("23" cast ShortType, 23)
+    checkEvaluation("23" cast FloatType, 23f)
+    checkEvaluation("23" cast DecimalType, 23: BigDecimal)
+    checkEvaluation("23" cast ByteType, 23.toByte)
+    checkEvaluation("23" cast ShortType, 23.toShort)
     checkEvaluation("2012-12-11" cast DoubleType, null)
     checkEvaluation(Literal(123) cast IntegerType, 123)
 
-    checkEvaluation(Literal(23d) + Cast(true, DoubleType), 24)
+    checkEvaluation(Literal(23d) + Cast(true, DoubleType), 24d)
     checkEvaluation(Literal(23) + Cast(true, IntegerType), 24)
-    checkEvaluation(Literal(23f) + Cast(true, FloatType), 24)
-    checkEvaluation(Literal(BigDecimal(23)) + Cast(true, DecimalType), 24)
-    checkEvaluation(Literal(23.toByte) + Cast(true, ByteType), 24)
-    checkEvaluation(Literal(23.toShort) + Cast(true, ShortType), 24)
+    checkEvaluation(Literal(23f) + Cast(true, FloatType), 24f)
+    checkEvaluation(Literal(BigDecimal(23)) + Cast(true, DecimalType), 24: BigDecimal)
+    checkEvaluation(Literal(23.toByte) + Cast(true, ByteType), 24.toByte)
+    checkEvaluation(Literal(23.toShort) + Cast(true, ShortType), 24.toShort)
 
     intercept[Exception] {evaluate(Literal(1) cast BinaryType, null)}
 

@@ -18,7 +18,7 @@
 package org.apache.spark.sql.execution
 
 import org.apache.spark.annotation.DeveloperApi
-import org.apache.spark.sql.catalyst.expressions.{Generator, JoinedRow, Literal, Projection}
+import org.apache.spark.sql.catalyst.expressions.{Generator, JoinedRow, Literal, InterpretedProjection}
 
 /**
  * :: DeveloperApi ::
@@ -48,10 +48,11 @@ case class Generate(
         val nullValues = Seq.fill(generator.output.size)(Literal(null))
         // Used to produce rows with no matches when outer = true.
         val outerProjection =
-          new Projection(child.output ++ nullValues, child.output)
+          new InterpretedProjection(child.output ++ nullValues, child.output)
 
         val joinProjection =
-          new Projection(child.output ++ generator.output, child.output ++ generator.output)
+          new InterpretedProjection(
+            child.output ++ generator.output, child.output ++ generator.output)
         val joinedRow = new JoinedRow
 
         iter.flatMap {row =>

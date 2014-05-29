@@ -33,6 +33,13 @@ abstract class DataType {
 
 case object NullType extends DataType
 
+object NativeType {
+  def all = Seq(
+    IntegerType, BooleanType, LongType, DoubleType, FloatType, ShortType, ByteType, StringType)
+
+  def unapply(dt: DataType): Boolean = all.contains(dt)
+}
+
 abstract class NativeType extends DataType {
   type JvmType
   @transient val tag: TypeTag[JvmType]
@@ -70,6 +77,13 @@ abstract class NumericType extends NativeType {
   // desugared by the compiler into an argument to the objects constructor. This means there is no
   // longer an no argument constructor and thus the JVM cannot serialize the object anymore.
   val numeric: Numeric[JvmType]
+}
+
+object NumericType {
+  def unapply(a: Expression): Boolean = a match {
+    case e: Expression if e.dataType.isInstanceOf[NumericType] => true
+    case _ => false
+  }
 }
 
 /** Matcher for any expressions that evaluate to [[IntegralType]]s */

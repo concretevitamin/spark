@@ -22,6 +22,20 @@ import org.apache.spark.sql.hive.test.TestHive._
 /**
  * A set of test cases expressed in Hive QL that are not covered by the tests included in the hive distribution.
  */
+class HiveCacheSuite extends HiveComparisonTest {
+  cache("src", "key" :: "value" :: Nil, "value" :: Nil)
+
+  println(catalog.lookupRelation(None, "src"))
+
+  println(executeSql("SELECT SUM(key) FROM src GROUP BY value"))
+
+  createQueryTest("Simple Average",
+    "SELECT SUM(key) FROM src GROUP BY value")
+}
+
+/**
+ * A set of test cases expressed in Hive QL that are not covered by the tests included in the hive distribution.
+ */
 class HiveQuerySuite extends HiveComparisonTest {
 
   createQueryTest("between",

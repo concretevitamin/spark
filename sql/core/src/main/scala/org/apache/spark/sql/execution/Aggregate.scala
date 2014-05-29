@@ -142,7 +142,7 @@ case class Aggregate(
             i += 1
           }
         }
-        val resultProjection = new Projection(resultExpressions, computedSchema)
+        val resultProjection = new InterpretedProjection(resultExpressions, computedSchema)
         val aggregateResults = new GenericMutableRow(computedAggregates.length)
 
         var i = 0
@@ -156,7 +156,7 @@ case class Aggregate(
     } else {
       child.execute().mapPartitions { iter =>
         val hashTable = new HashMap[Row, Array[AggregateFunction]]
-        val groupingProjection = new MutableProjection(groupingExpressions, childOutput)
+        val groupingProjection = new InterpretedMutableProjection(groupingExpressions, childOutput)
 
         var currentRow: Row = null
         while (iter.hasNext) {
@@ -179,7 +179,7 @@ case class Aggregate(
           private[this] val hashTableIter = hashTable.entrySet().iterator()
           private[this] val aggregateResults = new GenericMutableRow(computedAggregates.length)
           private[this] val resultProjection =
-            new MutableProjection(resultExpressions, computedSchema ++ namedGroups.map(_._2))
+            new InterpretedMutableProjection(resultExpressions, computedSchema ++ namedGroups.map(_._2))
           private[this] val joinedRow = new JoinedRow
 
           override final def hasNext: Boolean = hashTableIter.hasNext
