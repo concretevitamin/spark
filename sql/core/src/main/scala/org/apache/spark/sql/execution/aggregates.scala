@@ -61,17 +61,17 @@ case class HashAggregate(
 
     // Move these into expressions... have fall back that uses standard aggregate interface.
     val computeFunctions = aggregatesToCompute.map {
-      case Count(expr) =>
-        val currentCount = AttributeReference("currentCount", IntegerType, true)()
-        val initialValue = Literal(0)
-        val updateFunction = If(IsNotNull(expr), Add(currentCount, Literal(1)), currentCount)
+      case c @ Count(expr) =>
+        val currentCount = AttributeReference("currentCount", LongType, true)()
+        val initialValue = Literal(0L)
+        val updateFunction = If(IsNotNull(expr), Add(currentCount, Literal(1L)), currentCount)
         val result = currentCount
 
         AggregateEvaluation(currentCount :: Nil, initialValue :: Nil, updateFunction :: Nil, result)
 
       case Sum(expr) =>
         val currentSum = AttributeReference("currentSum", expr.dataType, true)()
-        val initialValue = Cast(Literal(0), expr.dataType)
+        val initialValue = Cast(Literal(0L), expr.dataType)
 
         // Coalasce avoids double calculation...
         // but really, common sub expression elimination would be better....
@@ -84,7 +84,7 @@ case class HashAggregate(
         val currentCount = AttributeReference("currentCount", LongType, true)()
         val currentSum = AttributeReference("currentSum", expr.dataType, true)()
         val initialCount = Literal(0L)
-        val initialSum = Cast(Literal(0), expr.dataType)
+        val initialSum = Cast(Literal(0L), expr.dataType)
         val updateCount = If(IsNotNull(expr), Add(currentCount, Literal(1L)), currentCount)
         val updateSum = Coalesce(Add(expr, currentSum) :: currentSum :: Nil)
 
