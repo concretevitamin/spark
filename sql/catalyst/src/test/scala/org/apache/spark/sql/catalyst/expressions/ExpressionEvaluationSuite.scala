@@ -129,6 +129,12 @@ class ExpressionEvaluationSuite extends FunSuite {
     }
   }
 
+  test("IN") {
+    checkEvaluation(In(Literal(1), Seq(Literal(1), Literal(2))), true)
+    checkEvaluation(In(Literal(2), Seq(Literal(1), Literal(2))), true)
+    checkEvaluation(In(Literal(3), Seq(Literal(1), Literal(2))), false)
+  }
+
   test("LIKE literal Regular Expression") {
     checkEvaluation(Literal(null, StringType).like("a"), null)
     checkEvaluation(Literal("a", StringType).like(Literal(null, StringType)), null)

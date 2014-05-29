@@ -209,6 +209,27 @@ class CodeGenerator extends Logging {
       case Equals(e1, e2) =>
         (e1, e2).evaluateAs (BooleanType) { case (eval1, eval2) => q"$eval1 == $eval2" }
 
+      case In(e1, list) if !list.exists(!_.isInstanceOf[expressions.Literal]) =>
+        val eval = expressionEvaluator(e1)
+
+        val checks = list.map {
+          case expressions.Literal(v: String, dataType) =>
+            q"if(${eval.primitiveTerm} == $v) return true"
+          case expressions.Literal(v: Int, dataType) =>
+            q"if(${eval.primitiveTerm} == $v) return true"
+        }
+
+        q"""
+            def isIn: Boolean = {
+              ..${eval.code}
+              if(${eval.nullTerm}) return false
+              ..$checks
+              return false
+            }
+            val $nullTerm = false
+            val $primitiveTerm = isIn
+        """.children
+
       case GreaterThan(e1 @ NumericType(), e2 @ NumericType()) =>
         (e1, e2).evaluateAs (BooleanType) { case (eval1, eval2) => q"$eval1 > $eval2" }
       case GreaterThanOrEqual(e1 @ NumericType(), e2 @ NumericType()) =>
