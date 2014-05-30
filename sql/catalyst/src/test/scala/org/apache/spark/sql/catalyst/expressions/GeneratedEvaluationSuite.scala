@@ -19,6 +19,7 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.dsl.expressions._
 
 /**
  * Overrides our expression evaluation tests and reruns them after optimization has occurred.  This
@@ -48,6 +49,25 @@ class GeneratedEvaluationSuite extends ExpressionEvaluationSuite {
       fail(s"Incorrect Evaluation: $expression, actual: $actual, expected: $expected$input")
     }
   }
+
+
+  test("multithreaded eval") {
+    import scala.concurrent._
+    import ExecutionContext.Implicits.global
+    import scala.concurrent.duration._
+
+    val futures = (1 to 20).map { _ =>
+      future {
+        GenerateCondition(Equals(Literal(1), Literal(1)))
+        GenerateProjection(Equals(Literal(1), Literal(1)) :: Nil)
+        GenerateMutableProjection(Equals(Literal(1), Literal(1)) :: Nil)
+        GenerateOrdering(Add(Literal(1), Literal(1)).asc :: Nil)
+      }
+    }
+
+    futures.foreach(Await.result(_, 10 seconds))
+  }
+
 }
 
 class GeneratedMutableEvaluationSuite extends ExpressionEvaluationSuite {

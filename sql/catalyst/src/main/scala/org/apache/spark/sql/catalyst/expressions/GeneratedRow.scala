@@ -48,6 +48,8 @@ object DumpByteCode {
   }
 }
 
+object CodeGeneration
+
 class CodeGenerator extends Logging {
   import scala.reflect.runtime.{universe => ru}
   import scala.reflect.runtime.universe._
@@ -463,7 +465,16 @@ object GenerateOrdering extends CodeGenerator {
   import scala.reflect.runtime.{universe => ru}
   import scala.reflect.runtime.universe._
 
-  def apply(ordering: Seq[SortOrder]): Ordering[Row] = {
+  // TODO: Should be weak references... bounded in size.
+  val orderingCache = new collection.mutable.HashMap[Seq[SortOrder], Ordering[Row]]
+
+  // TODO: Safe to fire up multiple instances of the compiler?
+  def apply(ordering: Seq[SortOrder]): Ordering[Row] = CodeGeneration.synchronized {
+    val cleanedExpression = ordering.map(ExpressionCanonicalizer(_)).asInstanceOf[Seq[SortOrder]]
+    orderingCache.getOrElseUpdate(cleanedExpression, createOrdering(cleanedExpression))
+  }
+
+  def createOrdering(ordering: Seq[SortOrder]): Ordering[Row] = {
     val a = newTermName("a")
     val b = newTermName("b")
     val comparisons = ordering.zipWithIndex.map { case (order, i) =>
@@ -532,7 +543,7 @@ object GenerateCondition extends CodeGenerator {
   val conditionCache = new collection.mutable.HashMap[Expression, (Row) => Boolean]
 
   // TODO: Safe to fire up multiple instances of the compiler?
-  def apply(condition: Expression): (Row => Boolean) = synchronized {
+  def apply(condition: Expression): (Row => Boolean) = CodeGeneration.synchronized {
     val cleanedExpression = ExpressionCanonicalizer(condition)
     conditionCache.getOrElseUpdate(cleanedExpression, createCondition(cleanedExpression))
   }
@@ -573,7 +584,7 @@ object GenerateMutableProjection extends CodeGenerator {
     apply(expressions.map(BindReferences.bindReference(_, inputSchema)))
 
   // TODO: Safe to fire up multiple instances of the compiler?
-  def apply(expressions: Seq[Expression]): (() => MutableProjection) = synchronized {
+  def apply(expressions: Seq[Expression]): (() => MutableProjection) = CodeGeneration.synchronized {
     val cleanedExpressions = expressions.map(ExpressionCanonicalizer(_))
     projectionCache.getOrElseUpdate(cleanedExpressions, createProjection(cleanedExpressions))
   }
@@ -631,7 +642,7 @@ object GenerateProjection extends CodeGenerator {
     apply(expressions.map(BindReferences.bindReference(_, inputSchema)))
 
   // TODO: Safe to fire up multiple instances of the compiler?
-  def apply(expressions: Seq[Expression]): Projection = synchronized {
+  def apply(expressions: Seq[Expression]): Projection = CodeGeneration.synchronized {
     val cleanedExpressions = expressions.map(ExpressionCanonicalizer(_))
     projectionCache.getOrElseUpdate(cleanedExpressions, createProjection(cleanedExpressions))
   }
