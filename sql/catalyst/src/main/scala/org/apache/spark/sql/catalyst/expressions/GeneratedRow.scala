@@ -22,6 +22,32 @@ package expressions
 import types._
 //import org.apache.spark.util.collection.BitSet
 
+object DumpByteCode {
+  import scala.sys.process._
+  val dumpDirectory = util.getTempFilePath("sparkSqlByteCode")
+  dumpDirectory.mkdir()
+
+  def apply(obj: Any): Unit = {
+    val generatedClass = obj.getClass
+    val classLoader =
+      generatedClass
+        .getClassLoader
+        .asInstanceOf[scala.tools.nsc.interpreter.AbstractFileClassLoader]
+    val generatedBytes = classLoader.classBytes(generatedClass.getName)
+
+    val packageDir = new java.io.File(dumpDirectory, generatedClass.getPackage.getName)
+    if (!packageDir.exists()) { packageDir.mkdir() }
+
+    val classFile = new java.io.File(packageDir, generatedClass.getName.split("\\.").last + ".class")
+
+    val outfile = new java.io.FileOutputStream(classFile)
+    outfile.write(generatedBytes)
+    outfile.close()
+
+    println(s"javap -p -v -classpath ${dumpDirectory.getCanonicalPath} ${generatedClass.getName}".!!)
+  }
+}
+
 class CodeGenerator extends Logging {
   import scala.reflect.runtime.{universe => ru}
   import scala.reflect.runtime.universe._
