@@ -788,6 +788,7 @@ private[hive] object HiveQl {
   val NOT = "(?i)NOT".r
   val TRUE = "(?i)TRUE".r
   val FALSE = "(?i)FALSE".r
+  val IN = "(?i)IN".r
 
   protected def nodeToExpr(node: Node): Expression = node match {
     /* Attribute References */
@@ -869,7 +870,7 @@ private[hive] object HiveQl {
       IsNotNull(nodeToExpr(child))
     case Token("TOK_FUNCTION", Token("TOK_ISNULL", Nil) :: child :: Nil) =>
       IsNull(nodeToExpr(child))
-    case Token("TOK_FUNCTION", Token("IN", Nil) :: value :: list) =>
+    case Token("TOK_FUNCTION", Token(IN(), Nil) :: value :: list) =>
       In(nodeToExpr(value), list.map(nodeToExpr))
     case Token("TOK_FUNCTION", Token(SUBSTR(), Nil) :: str :: start :: end :: Nil) =>
       SubString(nodeToExpr(str), nodeToExpr(start), nodeToExpr(end))
