@@ -245,15 +245,17 @@ class CodeGenerator extends Logging {
             q"if(${eval.primitiveTerm} == $v) return true"
         }
 
+        val funcName = newTermName(s"isIn${curId.getAndIncrement()}")
+
         q"""
-            def isIn: Boolean = {
+            def $funcName: Boolean = {
               ..${eval.code}
               if(${eval.nullTerm}) return false
               ..$checks
               return false
             }
             val $nullTerm = false
-            val $primitiveTerm = isIn
+            val $primitiveTerm = $funcName
         """.children
 
       case GreaterThan(e1 @ NumericType(), e2 @ NumericType()) =>
