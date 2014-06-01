@@ -895,7 +895,7 @@ private[hive] object HiveQl {
     // FIXME: works?
     // https://svn.apache.org/repos/asf/hive/tags/release-0.4.1/ql/src/test/results/clientpositive/ppd_udf_case.q.out
     case Token("TOK_FUNCTION", Token(CASE(), Nil) :: optKey :: branches) =>
-      CaseWhen(nodeToExpr(optKey), branches.map(nodeToExpr))
+      CaseWhen(nodeToExpr(optKey), branches.dropRight(1).map(nodeToExpr))
 
     /* Complex datatype manipulation */
     case Token("[", child :: ordinal :: Nil) =>
