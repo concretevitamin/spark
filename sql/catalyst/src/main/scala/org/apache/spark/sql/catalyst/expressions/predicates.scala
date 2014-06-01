@@ -202,3 +202,54 @@ case class If(predicate: Expression, trueValue: Expression, falseValue: Expressi
 
   override def toString = s"if ($predicate) $trueValue else $falseValue"
 }
+
+
+// FIXME: my eyes bleed looking at this code.
+// case when household_demographics.hd_vehicle_count > 0
+// then
+//    household_demographics.hd_dep_count / household_demographics.hd_vehicle_count
+// else
+//    null
+// end
+
+// CASE WHEN a THEN b [WHEN c THEN d]* [ELSE e] END
+// When a = true, returns b; when c = true, return d; else return e
+case class CaseWhen(optKey: Expression, branches: List[Expression])
+  extends Expression {
+
+  // FIXME?
+  def children = optKey :: branches
+
+  override def nullable = branches
+    .zipWithIndex
+    .filter(_._2 % 2 == 1)
+    .map(_._1.nullable)
+    .reduceLeft(_ || _)
+
+  def references = children.flatMap(_.references).toSet
+
+//  override lazy val resolved = childrenResolved && trueValue.dataType == falseValue.dataType
+
+  def dataType = {
+    if (!resolved) {
+      throw new UnresolvedException(
+        this,
+        s"FXIME")
+    }
+    branches(1).dataType
+  }
+
+  type EvaluatedType = Any
+
+  // FIXME: currently assume only one branch.
+  override def eval(input: Row): Any = {
+    if (branches(0).eval(input) == true) {
+      branches(1).eval(input)
+    } else {
+      branches(2).eval(input)
+    }
+  }
+
+  // FIXME
+  override def toString = s"*****FIXME*****"
+}

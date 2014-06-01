@@ -789,6 +789,7 @@ private[hive] object HiveQl {
   val TRUE = "(?i)TRUE".r
   val FALSE = "(?i)FALSE".r
   val IN = "(?i)IN".r
+  val CASE = "(?i)CASE".r
 
   protected def nodeToExpr(node: Node): Expression = node match {
     /* Attribute References */
@@ -889,6 +890,12 @@ private[hive] object HiveQl {
     case Token(AND(), left :: right:: Nil) => And(nodeToExpr(left), nodeToExpr(right))
     case Token(OR(), left :: right:: Nil) => Or(nodeToExpr(left), nodeToExpr(right))
     case Token(NOT(), child :: Nil) => Not(nodeToExpr(child))
+
+    /* Case and CaseWhen */
+    // FIXME: works?
+    // https://svn.apache.org/repos/asf/hive/tags/release-0.4.1/ql/src/test/results/clientpositive/ppd_udf_case.q.out
+    case Token("TOK_FUNCTION", Token(CASE(), Nil) :: optKey :: branches) =>
+      CaseWhen(nodeToExpr(optKey), branches.map(nodeToExpr))
 
     /* Complex datatype manipulation */
     case Token("[", child :: ordinal :: Nil) =>

@@ -374,6 +374,27 @@ class CodeGenerator extends Logging {
           }
         """.children
 
+      // FIXME: cargo-culted from IF; generalize this.
+      case i @ CaseWhen(optKey, cond0 :: value0 :: tail) =>
+        val condEval = expressionEvaluator(cond0)
+        val trueEval = expressionEvaluator(value0)
+        val falseEval = expressionEvaluator(tail(0))
+
+        q"""
+          var $nullTerm = false
+          var $primitiveTerm: ${termForType(i.dataType)} = ${defaultPrimitive(i.dataType)}
+          ..${condEval.code}
+          if(!${condEval.nullTerm} && ${condEval.primitiveTerm}) {
+            ..${trueEval.code}
+            $nullTerm = ${trueEval.nullTerm}
+            $primitiveTerm = ${trueEval.primitiveTerm}
+          } else {
+            ..${falseEval.code}
+            $nullTerm = ${falseEval.nullTerm}
+            $primitiveTerm = ${falseEval.primitiveTerm}
+          }
+        """.children
+
       case SubString(str, start, end) =>
         val stringEval = expressionEvaluator(str)
         val startEval = expressionEvaluator(start)
@@ -555,7 +576,7 @@ object GenerateCondition extends CodeGenerator {
       q"""
         (i: $rowType) => {
           ..${cEval.code}
-          if(${cEval.nullTerm}) false else ${cEval.primitiveTerm}
+          if (${cEval.nullTerm}) false else ${cEval.primitiveTerm}
         }
       """
 
