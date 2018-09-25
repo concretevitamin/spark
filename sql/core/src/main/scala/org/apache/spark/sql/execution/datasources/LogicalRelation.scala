@@ -34,6 +34,8 @@ case class LogicalRelation(
     override val isStreaming: Boolean)
   extends LeafNode with MultiInstanceRelation {
 
+  this.baseTableName = catalogTable.map(_.identifier.table)
+
   // Only care about relation when canonicalizing.
   override def doCanonicalize(): LogicalPlan = copy(
     output = output.map(QueryPlan.normalizeExprId(_, output)),

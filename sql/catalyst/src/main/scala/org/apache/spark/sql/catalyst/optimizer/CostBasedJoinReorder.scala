@@ -15,16 +15,131 @@
  * limitations under the License.
  */
 
+// scalastyle:off
 package org.apache.spark.sql.catalyst.optimizer
 
-import scala.collection.mutable
+import java.io.{BufferedWriter, File, FileWriter}
 
+import scala.collection.mutable
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.catalyst.catalog.SessionCatalog
 import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeSet, Expression, PredicateHelper}
+import org.apache.spark.sql.catalyst.optimizer.JoinReorderDP.JoinPlan
 import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, JoinType}
-import org.apache.spark.sql.catalyst.plans.logical.{BinaryNode, Join, LogicalPlan, Project}
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.internal.SQLConf
+
+
+object LearningOptimizer extends Logging {
+
+  val tfModel = new TensorFlowModel(
+    "/Users/zongheng/Dropbox/workspace/riselab/learned-opt/adam_128x3_lr5e-3_bs2048/")
+//  tfModel.run()
+
+  // For >= 2-relation sets, root can either be Project or a Join.
+  // Match on logical Join operators so we have correct left/right sides to work with.
+  private def findJoinSides(p: LogicalPlan): Option[(LogicalPlan, LogicalPlan)] = {
+    p match {
+      case p: Project => findJoinSides(p.child)
+      case j: Join =>
+        assert(j.children.size == 2)
+        Some((j.children.head, j.children(1)))
+      case _ => None
+    }
+  }
+
+  def infer(featVec: Seq[Float]): Float = {
+    tfModel.run(featVec)
+  }
+
+  def relNamesToOneHot(relNames: Seq[String],
+                       allTableNamesSorted: Seq[String]): Seq[Float] = {
+    allTableNamesSorted.map { name => if (relNames.contains(name)) 1f else 0f }
+  }
+
+  /** Feature vector of a LogicalPlan (the label is calculated elsewhere):
+    * Left-side relations (1-hot)
+    * Left-side est. card.
+    * Right-side relations (1-hot)
+    * Right-side est. card.
+    * Trajectory's final plan's all relations (1-hot)
+    * */
+  def featurize(plan: LogicalPlan,
+                rootRelsOneHot: Seq[Float],
+                conf: SQLConf,
+                allTableNamesSorted: Seq[String]): Seq[Float] = {
+    val result = findJoinSides(plan)
+
+    if (result.isDefined) {
+      val (left, right) = result.get
+      val leftVisibleRels = left.collectLeaves().flatMap(_.baseTableName)
+      val rightVisibleRels = right.collectLeaves().flatMap(_.baseTableName)
+
+      // Which relations are present?
+      val leftOneHot = relNamesToOneHot(leftVisibleRels, allTableNamesSorted)
+      val rightOneHot = relNamesToOneHot(rightVisibleRels, allTableNamesSorted)
+
+      // Each side's estimated cardinality?
+      val leftEstCard = left.stats.rowCount.get.toFloat
+      val rightEstCard = right.stats.rowCount.get.toFloat
+
+      val featureVector = (leftOneHot :+ leftEstCard) ++
+        (rightOneHot :+ rightEstCard) ++
+        rootRelsOneHot
+
+      // For debugging.
+      logInfo(s"features $featureVector")
+      logInfo(s"left Rels $leftVisibleRels OneHot $leftOneHot card $leftEstCard")
+      logInfo(s"right Rels $rightVisibleRels OneHot $rightOneHot card $rightEstCard")
+      logInfo(s"root rels $rootRelsOneHot")
+
+      featureVector
+    } else {
+      // This can be reached for, say, a leaf Project-Filter-Relation block -- a singleton relation.
+      // The NN does not need to worry about singleton base relations.
+      Seq.empty
+    }
+  }
+
+  /** Assumes "plan" is an optimal plan from some DP table.  Recursively collect training data. */
+  def trainingData(plan: JoinPlan,
+                   conf: SQLConf,
+                   allTableNamesSorted: Seq[String]): Seq[Seq[Float]] = {
+    // "plan" represents a terminal state, so use the same Q-val for all subplans.
+    val qVal = (plan.rootCost(conf) + plan.planCost).combine()
+
+    // The optimality of subplans is defined w.r.t. to joining these "root" rels.
+    // In other words, some subplan here may no longer be optimal if the goal is to join some other
+    // set of relations as the final goal.
+    val rootRels = plan.plan.collectLeaves().flatMap(_.baseTableName)
+    val rootRelsOneHot = relNamesToOneHot(rootRels, allTableNamesSorted)
+
+    val trainingData = mutable.Buffer.empty[Seq[Float]]
+    trainingDataHelper(plan.plan, trainingData, qVal, rootRelsOneHot, conf, allTableNamesSorted)
+//    logInfo(s"filled trainingData ${trainingData.mkString("\n")}")
+    trainingData
+  }
+
+  def trainingDataHelper(plan: LogicalPlan,
+                         trainingData: mutable.Buffer[Seq[Float]],
+                         qVal: Float,
+                         rootRelsOneHot: Seq[Float],
+                         conf: SQLConf,
+                         allTableNamesSorted: Seq[String]): Unit = {
+    val featVec = featurize(plan, rootRelsOneHot, conf, allTableNamesSorted)
+    if (featVec.nonEmpty) {
+      trainingData.append(featVec :+ qVal)
+      logInfo(s"Emitting training data for plan $plan")
+      logInfo(s"   ${trainingData.last}")
+    }
+    // All subplans underneath ME get the same Q-val.
+    plan.children.foreach(
+      trainingDataHelper(_, trainingData, qVal, rootRelsOneHot, conf, allTableNamesSorted))
+  }
+
+}
 
 
 /**
@@ -32,7 +147,10 @@ import org.apache.spark.sql.internal.SQLConf
  * We may have several join reorder algorithms in the future. This class is the entry of these
  * algorithms, and chooses which one to use.
  */
-object CostBasedJoinReorder extends Rule[LogicalPlan] with PredicateHelper {
+case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
+  extends Rule[LogicalPlan] with PredicateHelper {
+
+  JoinReorderDP.sessionCatalog = sessionCatalog
 
   private def conf = SQLConf.get
 
@@ -55,8 +173,15 @@ object CostBasedJoinReorder extends Rule[LogicalPlan] with PredicateHelper {
     }
   }
 
+  // TODO(zongheng): replace this with DQ (inference phase).
   private def reorder(plan: LogicalPlan, output: Seq[Attribute]): LogicalPlan = {
     val (items, conditions) = extractInnerJoins(plan)
+
+    logInfo(s"To search plan $plan")
+    logInfo(s"Items $items Conditions $conditions")
+    // Items is a list of Project-Filter-Relation blocks -- the base relations (LogicalPlan).
+    // Conditions looks like: Set((id#32 = movie_id#11), (id#32 = movie_id#26), ...)
+
     val result =
       // Do reordering if the number of items is appropriate and join conditions exist.
       // We also need to check if costs of all items can be evaluated.
@@ -139,6 +264,8 @@ case class OrderedJoin(
  */
 object JoinReorderDP extends PredicateHelper with Logging {
 
+  var sessionCatalog: SessionCatalog = _
+
   def search(
       conf: SQLConf,
       items: Seq[LogicalPlan],
@@ -149,9 +276,10 @@ object JoinReorderDP extends PredicateHelper with Logging {
     // Level i maintains all found plans for i + 1 items.
     // Create the initial plans: each plan is a single item with zero cost.
     val itemIndex = items.zipWithIndex
-    val foundPlans = mutable.Buffer[JoinPlanMap](itemIndex.map {
-      case (item, id) => Set(id) -> JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
-    }.toMap)
+    // Size == # relations.  Element at index i is the DP table for (i+1)-way join.
+//    val foundPlans = mutable.Buffer[JoinPlanMap](itemIndex.map {
+//      case (item, id) => Set(id) -> JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
+//    }.toMap)
 
     // Build filters from the join graph to be used by the search algorithm.
     val filters = JoinReorderDPFilters.buildJoinGraphInfo(conf, items, conditions, itemIndex)
@@ -159,18 +287,67 @@ object JoinReorderDP extends PredicateHelper with Logging {
     // Build plans for next levels until the last level has only one plan. This plan contains
     // all items that can be joined, so there's no need to continue.
     val topOutputSet = AttributeSet(output)
-    while (foundPlans.size < items.length) {
-      // Build plans for the next level.
-      foundPlans += searchLevel(foundPlans, conf, conditions, topOutputSet, filters)
+//    while (foundPlans.size < items.length) {
+//       Build plans for the next level.
+//      foundPlans += searchLevel(foundPlans, conf, conditions, topOutputSet, filters)
+//    }
+
+    def askNeuralNetForPlan(items: mutable.Buffer[JoinPlan]): LogicalPlan = {
+      val rootRels = items.flatMap(_.plan.collectLeaves().map(_.baseTableName.get))
+      val rootRelsOneHot =
+        LearningOptimizer.relNamesToOneHot(rootRels, allTableNamesSorted)
+      logInfo(s"NN planning - rootRels ${rootRels}")
+
+      while (items.length > 1) {
+        var bestScore = Float.MaxValue
+        var bestLeft: JoinPlan = null
+        var bestRight: JoinPlan = null
+        var newJoin: Option[JoinPlan] = None
+
+        for (i <- items.indices) {
+          for (j <- items.indices) {
+             buildJoin(items(i), items(j), conf, conditions, topOutputSet, filters)
+            match {
+              case join @ Some(newJoinPlan) =>
+                val featVec = LearningOptimizer.featurize(
+                  newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
+                val predictedCost = LearningOptimizer.infer(featVec)
+
+                if (predictedCost < bestScore) {
+                  newJoin = join
+                  bestScore = predictedCost
+                  bestLeft= items(i)
+                  bestRight= items(j)
+                }
+
+              case None =>
+            }
+
+          }
+        }
+
+        assert(bestLeft != null && bestRight != null)
+        items -= bestLeft
+        items -= bestRight
+        items.append(newJoin.get)
+      }
+      items.head.plan
     }
 
+    val foundPlan = askNeuralNetForPlan(mutable.Buffer(itemIndex.map { case (item, id) =>
+      JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
+    }: _*))
+
     val durationInMs = (System.nanoTime() - startTime) / (1000 * 1000)
-    logDebug(s"Join reordering finished. Duration: $durationInMs ms, number of items: " +
-      s"${items.length}, number of plans in memo: ${foundPlans.map(_.size).sum}")
+    logInfo(s"Join reordering finished. Duration: $durationInMs ms, number of items: " +
+      s"${items.length}")
+//    logInfo(s"number of plans in memo: ${foundPlans.map(_.size).sum}")
+
 
     // The last level must have one and only one plan, because all items are joinable.
-    assert(foundPlans.size == items.length && foundPlans.last.size == 1)
-    foundPlans.last.head._2.plan match {
+//    assert(foundPlans.size == items.length && foundPlans.last.size == 1)
+//    val foundPlan = foundPlans.last.head._2.plan
+    val retval = foundPlan match {
       case p @ Project(projectList, j: Join) if projectList != output =>
         assert(topOutputSet == p.outputSet)
         // Keep the same order of final output attributes.
@@ -178,7 +355,102 @@ object JoinReorderDP extends PredicateHelper with Logging {
       case finalPlan =>
         finalPlan
     }
+
+//    dumpLearningData(foundPlans)
+
+    logInfo(s"input rels to join:\n${items.mkString("\n")}")
+    logInfo(s"conditions:\n${conditions.mkString("\n")}")
+    logInfo(s"output attrs:\n${output.mkString("\n")}")
+    logInfo(s"final plan:\n${retval}")
+    logInfo(s"final plan stats: ${retval.stats}")
+//    logInfo(s"all found plans: $foundPlans")
+    retval
   }
+
+  /** Dumps appropriately calculated/featurized training data _from one particular query_. */
+  private def dumpLearningData(maps: mutable.Buffer[JoinReorderDP.JoinPlanMap]): Unit = {
+    logInfo(s"maps.size ${maps.size}")
+
+//    logInfo(s"AnalysisContext map ${AnalysisContext.getAttributeMap}")
+    val queryGraphRels = maps.last.head._2.plan.collectLeaves().flatMap(_.baseTableName)
+
+    val trainingDataFile = new File("job-sparksql-training.csv")
+    val bw = new BufferedWriter(new FileWriter(trainingDataFile, true))
+    val indexFile = new File("job-sparksql-index.csv")  // How many points from each query?
+    val bw2 = new BufferedWriter(new FileWriter(indexFile, true))
+    var numDataPoints = 0
+
+    maps.foreach { dpTable =>
+
+      dpTable.foreach { item =>
+        val plan = item._2
+
+        // TODO: maybe look at extractInnerJoins()
+        // For >= 2-relation sets, root can either be Project or a Join.
+        // Match on logical Join operators so we have correct left/right sides to work with.
+        def findJoinSides(p: LogicalPlan): Option[(LogicalPlan, LogicalPlan)] = {
+          p match {
+            case p: Project => findJoinSides(p.child)
+            case j: Join =>
+              assert(j.children.size == 2)
+              Some((j.children.head, j.children(1)))
+            case _ => None
+          }
+        }
+
+        val result = findJoinSides(plan.plan)
+        if (result.isDefined) {
+          val (left, right) = result.get
+          val leftVisibleRels = left.collectLeaves().flatMap(_.baseTableName)
+          val rightVisibleRels = right.collectLeaves().flatMap(_.baseTableName)
+
+          // TODO(zongheng): we can incorporate sizeInBytes as well.
+          val estimatedCard = plan.planCost.card.floatValue()
+          val myCost = plan.planCost.combine()
+          val leftEstCard = left.stats.rowCount.get.toFloat
+          val rightEstCard = right.stats.rowCount.get.toFloat
+
+          val feats =
+            s"""$leftVisibleRels $leftEstCard $rightVisibleRels $rightEstCard $queryGraphRels $estimatedCard $myCost (my planCost=${plan.planCost}; my rootCost=${plan.rootCost(SQLConf.get)})"""
+
+          val data = LearningOptimizer.trainingData(plan, SQLConf.get, allTableNamesSorted)
+          data.foreach(point => bw.write(point.mkString("", ",", "\n")))
+          numDataPoints += data.length
+
+          logInfo(s"features $feats")
+
+//          val leftVisibleAttrs = denormalizeAttributes(getVisibleAttributes(left))
+//          val rightVisibleAttrs = denormalizeAttributes(getVisibleAttributes(right))
+//          logInfo(s"left attrSet ${getVisibleAttributes(left)}")
+//          logInfo(s"right attrSet ${getVisibleAttributes(right)}")
+//          logInfo(s"left attrs $leftVisibleAttrs right attrs $rightVisibleAttrs")
+//          logInfo(s"  all attrs ${AnalysisContext.allAttributesSorted}")
+        }
+
+
+        logInfo(s"plan:\n${plan.plan}\n  attrs:${getVisibleAttributes(plan.plan)}\n")
+      }
+
+    }
+
+    bw.close()
+    logInfo(s"num data points $numDataPoints")
+    bw2.write(numDataPoints.toString)
+    bw2.write("\n")
+    bw2.close()
+
+    logInfo(s"queryGraphRels $queryGraphRels")
+    logInfo(s"allTables ${allTableNamesSorted}")
+//    maps.foreach { ()}
+//    ()
+  }
+
+  //  val file = new File(canonicalFilename)
+  //  val bw = new BufferedWriter(new FileWriter(file))
+  //  bw.write(text)
+  //  bw.close()
+
+
 
   /** Find all possible plans at the next level, based on existing levels. */
   private def searchLevel(
@@ -201,6 +473,7 @@ object JoinReorderDP extends PredicateHelper with Logging {
         val oneSidePlan = oneSideCandidates(i)
         val otherSideCandidates = if (k == lev - k) {
           // Both sides of a join are at the same level, no need to repeat for previous ones.
+          // I.e., no self-joins.
           oneSideCandidates.drop(i)
         } else {
           existingLevels(lev - k).values.toSeq
@@ -213,6 +486,11 @@ object JoinReorderDP extends PredicateHelper with Logging {
               // the existing one due to lower cost.
               val existingPlan = nextLevel.get(newJoinPlan.itemIds)
               if (existingPlan.isEmpty || newJoinPlan.betterThan(existingPlan.get, conf)) {
+//                if (existingPlan.isDefined && newJoinPlan.betterThan(existingPlan.get, conf)) {
+//                  // A better plan.  Let's log.
+//                  logInfo(s"existingPlan ${existingPlan.get.plan} planCost ${existingPlan.get.planCost} rootCost ${existingPlan.get.rootCost(conf)}")
+//                  logInfo(s"new ${newJoinPlan.plan} planCost ${newJoinPlan.planCost} rootCost ${newJoinPlan.rootCost(conf)}")
+//                }
                 nextLevel.update(newJoinPlan.itemIds, newJoinPlan)
               }
             case None =>
@@ -302,11 +580,62 @@ object JoinReorderDP extends PredicateHelper with Logging {
     // item), so the cost of the new join should also include its own cost.
     val newPlanCost = oneJoinPlan.planCost + oneJoinPlan.rootCost(conf) +
       otherJoinPlan.planCost + otherJoinPlan.rootCost(conf)
+
+    logInfo(s"** ${oneJoinPlan.planCost} ${oneJoinPlan.rootCost(conf)}")
+    logInfo(s"${otherJoinPlan.planCost} ${otherJoinPlan.rootCost(conf)}")
+    logInfo(s"$oneJoinPlan")
+    logInfo(s"$otherJoinPlan")
+
     Some(JoinPlan(itemIds, newPlan, collectedJoinConds, newPlanCost))
   }
 
   /** Map[set of item ids, join plan for these items] */
   type JoinPlanMap = Map[Set[Int], JoinPlan]
+
+  def findBaseRel(plan: LogicalPlan): Option[LogicalPlan] = {
+    plan match {
+      case p: LeafNode => Some(p)
+      case _ => findBaseRel(plan.children.head)
+    }
+  }
+
+  lazy val allTables: Seq[TableIdentifier] =
+    sessionCatalog.listTables(SessionCatalog.DEFAULT_DATABASE)
+
+  lazy val allTableNamesSorted: Seq[String] = allTables.map(_.table).sorted
+
+  lazy val allTableColumns: Seq[Seq[String]] =
+    allTables.map(sessionCatalog.getTableMetadata(_)).map(_.schema.map(_.name))
+
+  /** Static schema, not per-query data.  "tableName" -> Seq(col1, col2, ...). */
+  lazy val tableToColumns: Map[String, Seq[String]] = allTableNamesSorted.zip(allTableColumns).toMap
+
+  /** Static schema, not per-query data.  Seq(col1, col2, ...) -> tableName. */
+  lazy val columnsToTable: Map[Seq[String], String] =
+    allTableColumns.map(_.sorted).zip(allTableNamesSorted).toMap
+
+  def getVisibleAttributes(plan: LogicalPlan): AttributeSet = {
+    plan match {
+      case p: LeafNode =>
+//        val colNames = p.references.toSeq.map(_.name).sorted
+//        val tableName = columnsToTable.get(colNames)
+//
+//        logInfo(s"colNames ${colNames} tableName ${tableName} p.references ${p.references}")
+//        logInfo(s"allTables ${allTableNames}")
+//        logInfo(s"p.baseTableName ${p.baseTableName}")
+
+        p.references  // Assume filters/projects not pushed down.
+      case o => o.children.map(getVisibleAttributes).reduce(_ ++ _)
+    }
+  }
+
+//  /** Maps (id#1, anotherCol#111) into (20, 1), the ordinals of the attrs in DB. */
+//  def denormalizeAttributes(attrs: AttributeSet): Seq[Int] = {
+//    val translation = AnalysisContext.getAttributeMap
+//    val attrStrings = attrs.map(attr => translation.getOrElse(attr.toString, null)).toSeq
+//    val allAttrs = AnalysisContext.allAttributesSorted
+//    attrStrings.map(allAttrs.indexOf(_))
+//  }
 
   /**
    * Partial join order in a specific level.
@@ -337,6 +666,7 @@ object JoinReorderDP extends PredicateHelper with Logging {
       if (other.planCost.card == 0 || other.planCost.size == 0) {
         false
       } else {
+//        LearningOptimizer.featurize()
         val relativeRows = BigDecimal(this.planCost.card) / BigDecimal(other.planCost.card)
         val relativeSize = BigDecimal(this.planCost.size) / BigDecimal(other.planCost.size)
         relativeRows * conf.joinReorderCardWeight +
@@ -353,6 +683,13 @@ object JoinReorderDP extends PredicateHelper with Logging {
  */
 case class Cost(card: BigInt, size: BigInt) {
   def +(other: Cost): Cost = Cost(this.card + other.card, this.size + other.size)
+
+  /** NOTE(zongheng): should be kept in sync with JoinPlan.betterThan() above. */
+  def combine(): Float = {
+    val weight = SQLConf.get.joinReorderCardWeight
+    // This represents the cost model of Spark SQL's cost-based optimizer.
+    (BigDecimal(card) * weight + BigDecimal(size) * (1.0 - weight)).toFloat
+  }
 }
 
 /**
@@ -460,3 +797,4 @@ object JoinReorderDPFilters extends PredicateHelper {
  * extended with the set of connected/unconnected plans.
  */
 case class JoinGraphInfo (starJoins: Set[Int], nonStarJoins: Set[Int])
+// scalastyle:on

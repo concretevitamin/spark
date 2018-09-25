@@ -161,6 +161,8 @@ abstract class LogicalPlan
       input: Seq[Attribute],
       resolver: Resolver): Option[NamedExpression] = {
 
+    logInfo(s"nameParts ${nameParts} input ${input}")
+
     // A sequence of possible candidate matches.
     // Each candidate is a tuple. The first element is a resolved attribute, followed by a list
     // of parts that are to be resolved.
@@ -185,9 +187,13 @@ abstract class LogicalPlan
       }
     }
 
+    logInfo(s"candidates $candidates")
+
     def name = UnresolvedAttribute(nameParts).name
 
-    candidates.distinct match {
+    logInfo(s"name $name")
+
+    val r = candidates.distinct match {
       // One match, no nested fields, use it.
       case Seq((a, Nil)) => Some(a)
 
@@ -213,6 +219,9 @@ abstract class LogicalPlan
         throw new AnalysisException(
           s"Reference '$name' is ambiguous, could be: $referenceNames.")
     }
+
+    logInfo(s" ret val ${r}")
+    r
   }
 
   /**

@@ -139,7 +139,7 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
       RemoveRepetitionFromGroupExpressions) :: Nil ++
     operatorOptimizationBatch) :+
     Batch("Join Reorder", Once,
-      CostBasedJoinReorder) :+
+      CostBasedJoinReorder(sessionCatalog)) :+
     Batch("Decimal Optimizations", fixedPoint,
       DecimalAggregates) :+
     Batch("Object Expressions Optimization", fixedPoint,

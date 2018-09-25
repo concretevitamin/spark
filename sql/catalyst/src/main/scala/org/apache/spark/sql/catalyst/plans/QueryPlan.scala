@@ -25,6 +25,9 @@ import org.apache.spark.sql.types.{DataType, StructType}
 abstract class QueryPlan[PlanType <: QueryPlan[PlanType]] extends TreeNode[PlanType] {
   self: PlanType =>
 
+  // Defined only for LogicalRelation.
+  var baseTableName: Option[String] = None
+
   /**
    * The active config object within the current scope.
    * Note that if you want to refer config values during execution, you have to capture them

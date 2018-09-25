@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.catalyst.analysis
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
@@ -70,6 +71,19 @@ object AnalysisContext {
   private val value = new ThreadLocal[AnalysisContext]() {
     override def initialValue: AnalysisContext = AnalysisContext()
   }
+
+// private val attributeMap: mutable.HashMap[String, String] = new mutable.HashMap[String, String]()
+//
+//  /** Maps resolved references such as "note#13" back to "table.note", which is invariant. */
+//  def mapResolvedToUnresolved(resolved: Expression, unresolved: UnresolvedAttribute): Unit = {
+//    val resolvedString = resolved.toString
+//    val unresolvedString = unresolved.toString
+//    assert(attributeMap.getOrElse(resolvedString, unresolvedString).equals(unresolvedString))
+//    attributeMap.put(resolvedString, unresolvedString)
+//  }
+
+//  def getAttributeMap: Map[String, String] = attributeMap.toMap
+//  def allAttributesSorted: Seq[String] = attributeMap.values.toVector.sorted
 
   def get: AnalysisContext = value.get()
   def reset(): Unit = value.remove()
@@ -210,6 +224,7 @@ class Analyzer(
     }
 
     def substituteCTE(plan: LogicalPlan, cteRelations: Seq[(String, LogicalPlan)]): LogicalPlan = {
+      logInfo(s"substituteCTE: ${cteRelations}")
       plan transformDown {
         case u : UnresolvedRelation =>
           cteRelations.find(x => resolver(x._1, u.tableIdentifier.table))
@@ -249,7 +264,7 @@ class Analyzer(
    */
   object ResolveAliases extends Rule[LogicalPlan] {
     private def assignAliases(exprs: Seq[NamedExpression]) = {
-      exprs.map(_.transformUp { case u @ UnresolvedAlias(child, optGenAliasFunc) =>
+      val r = exprs.map(_.transformUp { case u @ UnresolvedAlias(child, optGenAliasFunc) =>
           child match {
             case ne: NamedExpression => ne
             case go @ GeneratorOuter(g: Generator) if g.resolved => MultiAlias(go, Nil)
@@ -263,6 +278,10 @@ class Analyzer(
           }
         }
       ).asInstanceOf[Seq[NamedExpression]]
+
+      logInfo(s"ResolveAliases: ${exprs}; ${r}")
+
+      r
     }
 
     private def hasUnresolvedAlias(exprs: Seq[NamedExpression]) =
@@ -613,6 +632,7 @@ class Analyzer(
     // have empty defaultDatabase and all the relations in viewText have database part defined.
     def resolveRelation(plan: LogicalPlan): LogicalPlan = plan match {
       case u: UnresolvedRelation if !isRunningDirectlyOnFiles(u.tableIdentifier) =>
+        logInfo(s"resolveRelation(): u ${u}; ${u.tableName}; ${u.tableIdentifier}")
         val defaultDatabase = AnalysisContext.get.defaultDatabase
         val foundRelation = lookupTableFromCatalog(u, defaultDatabase)
         resolveRelation(foundRelation)
@@ -820,6 +840,7 @@ class Analyzer(
 
     private def resolve(e: Expression, q: LogicalPlan): Expression = e match {
       case u @ UnresolvedAttribute(nameParts) =>
+        logInfo(s"In resolve(), u ${u}, nameParts ${nameParts}, e ${e}\n")
         // Leave unchanged if resolution fails. Hopefully will be resolved next round.
         val result =
           withPosition(u) {
@@ -827,6 +848,11 @@ class Analyzer(
               .orElse(resolveLiteralFunction(nameParts, u, q))
               .getOrElse(u)
           }
+
+//        AnalysisContext.mapResolvedToUnresolved(result, u)
+
+        logInfo(s"  resolveChildren() result: ${q.resolveChildren(nameParts, resolver)}")
+        logInfo(s"  Resolving $u to $result")
         logDebug(s"Resolving $u to $result")
         result
       case UnresolvedExtractValue(child, fieldExpr) if child.resolved =>
