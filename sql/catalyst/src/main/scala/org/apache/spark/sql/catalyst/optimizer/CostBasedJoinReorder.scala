@@ -35,7 +35,8 @@ import org.apache.spark.sql.internal.SQLConf
 object LearningOptimizer extends Logging {
 
   val tfModel = new TensorFlowModel(
-    "/Users/zongheng/Dropbox/workspace/riselab/learned-opt/adam_128x3_lr5e-3_bs2048/")
+  "/home/ubuntu/learned-opt/adam_128x3_lr5e-3_to_5e-4_at_15k_bs2048/")
+    //"/Users/zongheng/Dropbox/workspace/riselab/learned-opt/adam_128x3_lr5e-3_bs2048/")
 //  tfModel.run()
 
   // For >= 2-relation sets, root can either be Project or a Join.
