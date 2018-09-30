@@ -34,10 +34,11 @@ import org.apache.spark.sql.internal.SQLConf
 
 object LearningOptimizer extends Logging {
 
-  val tfModel = new TensorFlowModel(
-  "/home/ubuntu/learned-opt/adam_128x3_lr5e-3_to_5e-4_at_15k_bs2048/")
-    //"/Users/zongheng/Dropbox/workspace/riselab/learned-opt/adam_128x3_lr5e-3_bs2048/")
-//  tfModel.run()
+  lazy val tfModel = new TensorFlowModel(SQLConf.get.joinReorderNeuralNetPath)
+
+  def infer(featVec: Seq[Float]): Float = {
+    tfModel.run(featVec)
+  }
 
   // For >= 2-relation sets, root can either be Project or a Join.
   // Match on logical Join operators so we have correct left/right sides to work with.
@@ -49,10 +50,6 @@ object LearningOptimizer extends Logging {
         Some((j.children.head, j.children(1)))
       case _ => None
     }
-  }
-
-  def infer(featVec: Seq[Float]): Float = {
-    tfModel.run(featVec)
   }
 
   def relNamesToOneHot(relNames: Seq[String],
@@ -174,7 +171,6 @@ case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
     }
   }
 
-  // TODO(zongheng): replace this with DQ (inference phase).
   private def reorder(plan: LogicalPlan, output: Seq[Attribute]): LogicalPlan = {
     val (items, conditions) = extractInnerJoins(plan)
 
@@ -278,9 +274,9 @@ object JoinReorderDP extends PredicateHelper with Logging {
     // Create the initial plans: each plan is a single item with zero cost.
     val itemIndex = items.zipWithIndex
     // Size == # relations.  Element at index i is the DP table for (i+1)-way join.
-//    val foundPlans = mutable.Buffer[JoinPlanMap](itemIndex.map {
-//      case (item, id) => Set(id) -> JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
-//    }.toMap)
+    val foundPlans = mutable.Buffer[JoinPlanMap](itemIndex.map {
+      case (item, id) => Set(id) -> JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
+    }.toMap)
 
     // Build filters from the join graph to be used by the search algorithm.
     val filters = JoinReorderDPFilters.buildJoinGraphInfo(conf, items, conditions, itemIndex)
@@ -288,66 +284,68 @@ object JoinReorderDP extends PredicateHelper with Logging {
     // Build plans for next levels until the last level has only one plan. This plan contains
     // all items that can be joined, so there's no need to continue.
     val topOutputSet = AttributeSet(output)
-//    while (foundPlans.size < items.length) {
-//       Build plans for the next level.
-//      foundPlans += searchLevel(foundPlans, conf, conditions, topOutputSet, filters)
-//    }
+    var foundPlan: LogicalPlan = null
 
-    def askNeuralNetForPlan(items: mutable.Buffer[JoinPlan]): LogicalPlan = {
-      val rootRels = items.flatMap(_.plan.collectLeaves().map(_.baseTableName.get))
-      val rootRelsOneHot =
-        LearningOptimizer.relNamesToOneHot(rootRels, allTableNamesSorted)
-      logInfo(s"NN planning - rootRels ${rootRels}")
-
-      while (items.length > 1) {
-        var bestScore = Float.MaxValue
-        var bestLeft: JoinPlan = null
-        var bestRight: JoinPlan = null
-        var newJoin: Option[JoinPlan] = None
-
-        for (i <- items.indices) {
-          for (j <- items.indices) {
-             buildJoin(items(i), items(j), conf, conditions, topOutputSet, filters)
-            match {
-              case join @ Some(newJoinPlan) =>
-                val featVec = LearningOptimizer.featurize(
-                  newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
-                val predictedCost = LearningOptimizer.infer(featVec)
-
-                if (predictedCost < bestScore) {
-                  newJoin = join
-                  bestScore = predictedCost
-                  bestLeft= items(i)
-                  bestRight= items(j)
-                }
-
-              case None =>
-            }
-
-          }
-        }
-
-        assert(bestLeft != null && bestRight != null)
-        items -= bestLeft
-        items -= bestRight
-        items.append(newJoin.get)
+    if (conf.joinReorderNeuralNetPath.isEmpty) {
+      while (foundPlans.size < items.length) {
+        // Build plans for the next level.
+        foundPlans += searchLevel(foundPlans, conf, conditions, topOutputSet, filters)
       }
-      items.head.plan
-    }
+      logInfo(s"number of plans in memo: ${foundPlans.map(_.size).sum}")
+      assert(foundPlans.size == items.length && foundPlans.last.size == 1)
+      foundPlan = foundPlans.last.head._2.plan
+    } else {
+      def askNeuralNetForPlan(items: mutable.Buffer[JoinPlan]): LogicalPlan = {
+        val rootRels = items.flatMap(_.plan.collectLeaves().map(_.baseTableName.get))
+        val rootRelsOneHot =
+          LearningOptimizer.relNamesToOneHot(rootRels, allTableNamesSorted)
+        logInfo(s"Using NN for planning - rootRels $rootRels")
 
-    val foundPlan = askNeuralNetForPlan(mutable.Buffer(itemIndex.map { case (item, id) =>
-      JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
-    }: _*))
+        while (items.length > 1) {
+          var bestScore = Float.MaxValue
+          var bestLeft: JoinPlan = null
+          var bestRight: JoinPlan = null
+          var newJoin: Option[JoinPlan] = None
+
+          for (i <- items.indices) {
+            for (j <- items.indices) {
+              buildJoin(items(i), items(j), conf, conditions, topOutputSet, filters) match {
+                case join@Some(newJoinPlan) =>
+                  val featVec = LearningOptimizer.featurize(
+                    newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
+                  val predictedCost = LearningOptimizer.infer(featVec)
+
+                  if (predictedCost < bestScore) {
+                    newJoin = join
+                    bestScore = predictedCost
+                    bestLeft = items(i)
+                    bestRight = items(j)
+                  }
+
+                case None =>
+              }
+
+            }
+          }
+
+          assert(bestLeft != null && bestRight != null)
+          items -= bestLeft
+          items -= bestRight
+          items.append(newJoin.get)
+        }
+        items.head.plan
+      }
+
+      foundPlan = askNeuralNetForPlan(mutable.Buffer(itemIndex.map { case (item, id) =>
+        JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
+      }: _*))
+    }
 
     val durationInMs = (System.nanoTime() - startTime) / (1000 * 1000)
     logInfo(s"Join reordering finished. Duration: $durationInMs ms, number of items: " +
       s"${items.length}")
-//    logInfo(s"number of plans in memo: ${foundPlans.map(_.size).sum}")
-
 
     // The last level must have one and only one plan, because all items are joinable.
-//    assert(foundPlans.size == items.length && foundPlans.last.size == 1)
-//    val foundPlan = foundPlans.last.head._2.plan
     val retval = foundPlan match {
       case p @ Project(projectList, j: Join) if projectList != output =>
         assert(topOutputSet == p.outputSet)

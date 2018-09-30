@@ -956,6 +956,12 @@ object SQLConf {
       .booleanConf
       .createWithDefault(false)
 
+  val JOIN_REORDER_NEURALNETPATH =
+    buildConf("spark.sql.cbo.joinReorder.neuralNetPath")
+      .doc("If empty, use the default dynamic program; otherwise use a neural net under this path.")
+      .stringConf
+      .createWithDefault("")
+
   val JOIN_REORDER_DP_THRESHOLD =
     buildConf("spark.sql.cbo.joinReorder.dp.threshold")
       .doc("The maximum number of joined nodes allowed in the dynamic programming algorithm.")
@@ -1476,6 +1482,8 @@ class SQLConf extends Serializable with Logging {
   def autoSizeUpdateEnabled: Boolean = getConf(SQLConf.AUTO_SIZE_UPDATE_ENABLED)
 
   def joinReorderEnabled: Boolean = getConf(SQLConf.JOIN_REORDER_ENABLED)
+
+  def joinReorderNeuralNetPath: String = getConf(SQLConf.JOIN_REORDER_NEURALNETPATH)
 
   def joinReorderDPThreshold: Int = getConf(SQLConf.JOIN_REORDER_DP_THRESHOLD)
 

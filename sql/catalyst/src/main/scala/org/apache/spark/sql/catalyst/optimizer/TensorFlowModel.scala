@@ -27,7 +27,7 @@ import org.tensorflow.{Graph, Session, Tensors}
 
 class TensorFlowModel(modelDir: String) extends Logging {
 
-  logInfo("In TensorFlowModel")
+  logInfo(s"TensorFlowModel, loading from $modelDir")
 
   // Load the model.
   private val graphPath = modelDir + "frozen_graph.pb"
