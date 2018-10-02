@@ -33,6 +33,9 @@ abstract class LogicalPlan
   with QueryPlanConstraints
   with Logging {
 
+  /** Useful to distinguish the same LogicalRelation that occurs multiple times in a query. */
+  var disambiguationIndex: Int = _
+
   /** Returns true if this subtree has data from a streaming data source. */
   def isStreaming: Boolean = children.exists(_.isStreaming == true)
 

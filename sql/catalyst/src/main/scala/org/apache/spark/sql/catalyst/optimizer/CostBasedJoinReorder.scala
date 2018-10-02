@@ -52,9 +52,22 @@ object LearningOptimizer extends Logging {
     }
   }
 
-  def relNamesToOneHot(relNames: Seq[String],
-                       allTableNamesSorted: Seq[String]): Seq[Float] = {
-    allTableNamesSorted.map { name => if (relNames.contains(name)) 1f else 0f }
+//  def relNamesToOneHot(relNames: Seq[String],
+//                       allTableNamesSorted: Seq[String]): Seq[Float] = {
+//    allTableNamesSorted.map { name => if (relNames.contains(name)) 1f else 0f }
+//  }
+
+  def leafRelationsToOneHot(leafRelations: Seq[LogicalPlan],
+                            allTableNamesSorted: Seq[String]): Seq[Float] = {
+    // Assume each distinct relation occurs at most twice in any query.
+    val buffer = mutable.Buffer.fill(allTableNamesSorted.size * 2)(0f)
+    leafRelations.foreach { leaf =>
+      val index = allTableNamesSorted.indexOf(leaf.baseTableName.get) * 2
+      assert(index >= 0)
+      assert(buffer(index + leaf.disambiguationIndex) == 0f)
+      buffer(index + leaf.disambiguationIndex) = 1f
+    }
+    buffer
   }
 
   /** Feature vector of a LogicalPlan (the label is calculated elsewhere):
@@ -76,8 +89,10 @@ object LearningOptimizer extends Logging {
       val rightVisibleRels = right.collectLeaves().flatMap(_.baseTableName)
 
       // Which relations are present?
-      val leftOneHot = relNamesToOneHot(leftVisibleRels, allTableNamesSorted)
-      val rightOneHot = relNamesToOneHot(rightVisibleRels, allTableNamesSorted)
+//      val leftOneHot = relNamesToOneHot(leftVisibleRels, allTableNamesSorted)
+//      val rightOneHot = relNamesToOneHot(rightVisibleRels, allTableNamesSorted)
+      val leftOneHot = leafRelationsToOneHot(left.collectLeaves(), allTableNamesSorted)
+      val rightOneHot = leafRelationsToOneHot(right.collectLeaves(), allTableNamesSorted)
 
       // Each side's estimated cardinality?
       val leftEstCard = left.stats.rowCount.get.toFloat
@@ -91,6 +106,8 @@ object LearningOptimizer extends Logging {
       logInfo(s"features $featureVector")
       logInfo(s"left Rels $leftVisibleRels OneHot $leftOneHot card $leftEstCard")
       logInfo(s"right Rels $rightVisibleRels OneHot $rightOneHot card $rightEstCard")
+      logInfo(s"left leaves idx ${left.collectLeaves().map(_.disambiguationIndex)}")
+      logInfo(s"right leaves idx ${right.collectLeaves().map(_.disambiguationIndex)}")
       logInfo(s"root rels $rootRelsOneHot")
 
       featureVector
@@ -111,8 +128,11 @@ object LearningOptimizer extends Logging {
     // The optimality of subplans is defined w.r.t. to joining these "root" rels.
     // In other words, some subplan here may no longer be optimal if the goal is to join some other
     // set of relations as the final goal.
-    val rootRels = plan.plan.collectLeaves().flatMap(_.baseTableName)
-    val rootRelsOneHot = relNamesToOneHot(rootRels, allTableNamesSorted)
+//    val rootRels = plan.plan.collectLeaves().flatMap(_.baseTableName)
+//    val rootRelsOneHot = relNamesToOneHot(rootRels, allTableNamesSorted)
+
+    val rootRelsOneHot =
+      leafRelationsToOneHot(plan.plan.collectLeaves(), allTableNamesSorted)
 
     val trainingData = mutable.Buffer.empty[Seq[Float]]
     trainingDataHelper(plan.plan, trainingData, qVal, rootRelsOneHot, conf, allTableNamesSorted)
@@ -171,8 +191,38 @@ case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
     }
   }
 
+  private def assignDisambiguationIndex(rootQuery: LogicalPlan) = {
+    var r = rootQuery.collectLeaves().map { leaf =>
+      (leaf, leaf.baseTableName.get, leaf.hashCode())
+    }
+    logInfo(s"leaf name hashcode $r")
+    // Sort by base table name first, then by hash code.
+    r = r.sortWith { case ((p1, n1, h1), (p2, n2, h2)) =>
+      if (n1 != n2) n1 < n2 else h1 < h2
+    }
+    var i = 0
+    while (i < r.size) {
+      var inc = 1
+      r(i)._1.disambiguationIndex = 0
+      if (i + 1 < r.size && r(i + 1)._2 == r(i)._2) {
+        // If next item has the same base table name.
+        r(i + 1)._1.disambiguationIndex = 1
+        inc = 2
+      }
+      assert(i + 2 >= r.size || r(i + 2)._2 != r(i)._2)
+      i += inc
+    }
+  }
+
   private def reorder(plan: LogicalPlan, output: Seq[Attribute]): LogicalPlan = {
+
+//    assignDisambiguationIndex(plan)
+
+//    logInfo(s"names and idx ${plan.collectLeaves().map(r => (r.baseTableName, r.disambiguationIndex))}")
+
     val (items, conditions) = extractInnerJoins(plan)
+
+    logInfo(s"item names and idx ${items.flatMap(_.collectLeaves()).map(r => (r.baseTableName, r.disambiguationIndex))}")
 
     logInfo(s"To search plan $plan")
     logInfo(s"Items $items Conditions $conditions")
@@ -273,10 +323,6 @@ object JoinReorderDP extends PredicateHelper with Logging {
     // Level i maintains all found plans for i + 1 items.
     // Create the initial plans: each plan is a single item with zero cost.
     val itemIndex = items.zipWithIndex
-    // Size == # relations.  Element at index i is the DP table for (i+1)-way join.
-    val foundPlans = mutable.Buffer[JoinPlanMap](itemIndex.map {
-      case (item, id) => Set(id) -> JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
-    }.toMap)
 
     // Build filters from the join graph to be used by the search algorithm.
     val filters = JoinReorderDPFilters.buildJoinGraphInfo(conf, items, conditions, itemIndex)
@@ -286,19 +332,41 @@ object JoinReorderDP extends PredicateHelper with Logging {
     val topOutputSet = AttributeSet(output)
     var foundPlan: LogicalPlan = null
 
-    if (conf.joinReorderNeuralNetPath.isEmpty) {
+    def askDpForPlan(items: Seq[LogicalPlan]): (LogicalPlan, Float) = {
+
+      // Size == # relations.  Element at index i is the DP table for (i+1)-way join.
+      val foundPlans = mutable.Buffer[JoinPlanMap](itemIndex.map {
+        case (item, id) => Set(id) -> JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
+      }.toMap)
+
       while (foundPlans.size < items.length) {
         // Build plans for the next level.
         foundPlans += searchLevel(foundPlans, conf, conditions, topOutputSet, filters)
       }
       logInfo(s"number of plans in memo: ${foundPlans.map(_.size).sum}")
       assert(foundPlans.size == items.length && foundPlans.last.size == 1)
-      foundPlan = foundPlans.last.head._2.plan
+
+      (foundPlans.last.head._2.plan,
+        (foundPlans.last.head._2.planCost + foundPlans.last.head._2.rootCost(conf)).combine())
+    }
+
+    if (conf.joinReorderNeuralNetPath.isEmpty) {
+
+      foundPlan = askDpForPlan(items)._1
+
     } else {
-      def askNeuralNetForPlan(items: mutable.Buffer[JoinPlan]): LogicalPlan = {
+      def askNeuralNetForPlan(items: mutable.Buffer[JoinPlan]): (LogicalPlan, Float) = {
         val rootRels = items.flatMap(_.plan.collectLeaves().map(_.baseTableName.get))
-        val rootRelsOneHot =
-          LearningOptimizer.relNamesToOneHot(rootRels, allTableNamesSorted)
+//        val rootRelsOneHot =
+//          LearningOptimizer.relNamesToOneHot(rootRels, allTableNamesSorted)
+        logInfo(s"item leaves ${items.flatMap(_.plan.collectLeaves())}")
+        logInfo(s"item leaves names ${items.flatMap(_.plan.collectLeaves()).map(_.baseTableName)}")
+        logInfo(s"item leaves idx ${items.flatMap(_.plan.collectLeaves()).map(_.disambiguationIndex)}")
+        val rootRelsOneHot = LearningOptimizer.leafRelationsToOneHot(
+          items.flatMap(_.plan.collectLeaves()), allTableNamesSorted
+        )
+
+//        val rootRelsOneHot = LearningOptimizer.leafRelationsToOneHot(items.map(_.plan.collectLeaves()))
         logInfo(s"Using NN for planning - rootRels $rootRels")
 
         while (items.length > 1) {
@@ -333,12 +401,28 @@ object JoinReorderDP extends PredicateHelper with Logging {
           items -= bestRight
           items.append(newJoin.get)
         }
-        items.head.plan
+
+        val finalPlanAnalyticalCost = (items.head.planCost + items.head.rootCost(conf)).combine()
+        val predictedCostFinal = LearningOptimizer.infer(
+          LearningOptimizer.featurize(items.head.plan, rootRelsOneHot, conf, allTableNamesSorted))
+        val diff = (predictedCostFinal - finalPlanAnalyticalCost) / finalPlanAnalyticalCost * 100
+        logWarning(s"produced plan: analytical cost $finalPlanAnalyticalCost predicted $predictedCostFinal diff% $diff")
+        (items.head.plan, finalPlanAnalyticalCost)
       }
 
-      foundPlan = askNeuralNetForPlan(mutable.Buffer(itemIndex.map { case (item, id) =>
+      val (nnPlan, nnPlanCost) = askNeuralNetForPlan(mutable.Buffer(itemIndex.map { case (item, id) =>
         JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
       }: _*))
+
+      val (dpPlan, dpPlanCost) = askDpForPlan(items)
+
+      val d = (nnPlanCost - dpPlanCost) / dpPlanCost * 100
+      val subopt = nnPlanCost / dpPlanCost
+      logWarning(s"nn plan cost $nnPlanCost dp plan cost $dpPlanCost diff% $d subopt $subopt")
+      logWarning(s"nn plan $nnPlan")
+      logWarning(s"dp plan $dpPlan")
+
+      foundPlan = nnPlan
     }
 
     val durationInMs = (System.nanoTime() - startTime) / (1000 * 1000)
@@ -665,7 +749,6 @@ object JoinReorderDP extends PredicateHelper with Logging {
       if (other.planCost.card == 0 || other.planCost.size == 0) {
         false
       } else {
-//        LearningOptimizer.featurize()
         val relativeRows = BigDecimal(this.planCost.card) / BigDecimal(other.planCost.card)
         val relativeSize = BigDecimal(this.planCost.size) / BigDecimal(other.planCost.size)
         relativeRows * conf.joinReorderCardWeight +

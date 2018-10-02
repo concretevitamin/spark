@@ -657,14 +657,16 @@ class Analyzer(
       case _ => plan
     }
 
-    def apply(plan: LogicalPlan): LogicalPlan = plan.transformUp {
-      case i @ InsertIntoTable(u: UnresolvedRelation, parts, child, _, _) if child.resolved =>
-        EliminateSubqueryAliases(lookupTableFromCatalog(u)) match {
-          case v: View =>
-            u.failAnalysis(s"Inserting into a view is not allowed. View: ${v.desc.identifier}.")
-          case other => i.copy(table = other)
-        }
-      case u: UnresolvedRelation => resolveRelation(u)
+    def apply(plan: LogicalPlan): LogicalPlan = {
+      plan.transformUp {
+        case i @ InsertIntoTable(u: UnresolvedRelation, parts, child, _, _) if child.resolved =>
+          EliminateSubqueryAliases(lookupTableFromCatalog(u)) match {
+            case v: View =>
+              u.failAnalysis(s"Inserting into a view is not allowed. View: ${v.desc.identifier}.")
+            case other => i.copy(table = other)
+          }
+        case u: UnresolvedRelation => resolveRelation(u)
+      }
     }
 
     // Look up the table with the given name from catalog. The database we used is decided by the
@@ -2341,13 +2343,40 @@ class Analyzer(
   }
 }
 
+case class AssignDisambiguationIndex(sessionCatalog: SessionCatalog) extends Rule[LogicalPlan] {
+  def apply(plan: LogicalPlan): LogicalPlan = {
+    logInfo(s"AssignDisambiguationIndex, plan $plan")
+    // First pass.
+    // Map(company_name -> Set(cn1, cn2), link_type -> Set(lt), ...)
+    val origToShortNames = mutable.Map.empty[String, Set[String]]
+    plan transformDown {
+      case p @ SubqueryAlias(shortName, SubqueryAlias(origName, child)) =>
+        val oldSeq = origToShortNames.getOrElse(origName, Set.empty[String])
+        origToShortNames.update(origName, oldSeq union Set(shortName))
+        p
+    }
+    logInfo(s"origToShort $origToShortNames")
+    // Second pass.
+    plan transformDown {
+      case p @ SubqueryAlias(shortName, SubqueryAlias(origName, child)) =>
+        logInfo(s"${origToShortNames.getOrElse(origName, null).toSeq.sorted}; $shortName")
+        child.disambiguationIndex = origToShortNames
+          .getOrElse(origName, null).toSeq.sorted.indexOf(shortName)
+        p
+    }
+  }
+}
+
 /**
  * Removes [[SubqueryAlias]] operators from the plan. Subqueries are only required to provide
  * scoping information for attributes and can be removed once analysis is complete.
  */
 object EliminateSubqueryAliases extends Rule[LogicalPlan] {
-  def apply(plan: LogicalPlan): LogicalPlan = plan transformUp {
-    case SubqueryAlias(_, child) => child
+  def apply(plan: LogicalPlan): LogicalPlan = {
+    logInfo(s"EliminateSubqueryAliases, plan $plan")
+    plan transformUp {
+      case SubqueryAlias(_, child) => child
+    }
   }
 }
 

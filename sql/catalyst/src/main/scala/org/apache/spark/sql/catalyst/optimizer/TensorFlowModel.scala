@@ -27,7 +27,9 @@ import org.tensorflow.{Graph, Session, Tensors}
 
 class TensorFlowModel(modelDir: String) extends Logging {
 
-  logInfo(s"TensorFlowModel, loading from $modelDir")
+  val CARDINALITY_COLUMNS = Seq(42, 85)
+
+  logInfo(s"TensorFlowModel, loading from $modelDir, card columns $CARDINALITY_COLUMNS")
 
   // Load the model.
   private val graphPath = modelDir + "frozen_graph.pb"
@@ -40,8 +42,7 @@ class TensorFlowModel(modelDir: String) extends Logging {
   def transformFeatures(xs: Array[Array[Double]]): Array[Array[Float]] = {
 //    logInfo(s"xs ${xs.map(_.mkString(",")).mkString("\n")}")
     val ret = xs.map { arr =>
-      arr(21) = Math.log(arr(21)).toFloat
-      arr(43) = Math.log(arr(43)).toFloat
+      CARDINALITY_COLUMNS.foreach { col => arr(col) = Math.log(arr(col)).toFloat }
       arr.map(_.toFloat)
     }
 //    logInfo(s"ret ${ret.map(_.mkString(",")).mkString("\n")}")
@@ -50,8 +51,7 @@ class TensorFlowModel(modelDir: String) extends Logging {
 
   def transform(xs: Array[Array[Float]]): Array[Array[Float]] = {
     xs.foreach { arr =>
-      arr(21) = Math.log(arr(21)).toFloat
-      arr(43) = Math.log(arr(43)).toFloat
+      CARDINALITY_COLUMNS.foreach { col => arr(col) = Math.log(arr(col)).toFloat }
     }
     xs
   }
