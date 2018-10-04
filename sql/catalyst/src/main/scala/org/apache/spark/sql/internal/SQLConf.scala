@@ -962,6 +962,19 @@ object SQLConf {
       .stringConf
       .createWithDefault("")
 
+  val JOIN_REORDER_DUMP_TRAINING_DATA =
+    buildConf("spark.sql.cbo.joinReorder.dumpTrainingDataPath")
+      .doc("If non-empty, dump the dynamic program's data to this path.")
+      .stringConf
+      .createWithDefault("")
+
+  val JOIN_REORDER_USE_LINEAR_COST =
+    buildConf("spark.sql.cbo.joinReorder.useLinearCost")
+      .internal()
+      .doc("Defaults to false (Spark's original impl).  Sets to true to use a simple linear model.")
+      .booleanConf
+      .createWithDefault(false)
+
   val JOIN_REORDER_DP_THRESHOLD =
     buildConf("spark.sql.cbo.joinReorder.dp.threshold")
       .doc("The maximum number of joined nodes allowed in the dynamic programming algorithm.")
@@ -1484,6 +1497,10 @@ class SQLConf extends Serializable with Logging {
   def joinReorderEnabled: Boolean = getConf(SQLConf.JOIN_REORDER_ENABLED)
 
   def joinReorderNeuralNetPath: String = getConf(SQLConf.JOIN_REORDER_NEURALNETPATH)
+
+  def joinReorderDumpTrainingData: String = getConf(SQLConf.JOIN_REORDER_DUMP_TRAINING_DATA)
+
+  def joinReorderUseLinearCost: Boolean = getConf(SQLConf.JOIN_REORDER_USE_LINEAR_COST)
 
   def joinReorderDPThreshold: Int = getConf(SQLConf.JOIN_REORDER_DP_THRESHOLD)
 

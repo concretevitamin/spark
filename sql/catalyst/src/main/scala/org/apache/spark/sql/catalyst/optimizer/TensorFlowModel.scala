@@ -29,14 +29,17 @@ class TensorFlowModel(modelDir: String) extends Logging {
 
   val CARDINALITY_COLUMNS = Seq(42, 85)
 
-  logInfo(s"TensorFlowModel, loading from $modelDir, card columns $CARDINALITY_COLUMNS")
+  logWarning(s"TensorFlowModel, loading from $modelDir, card columns $CARDINALITY_COLUMNS")
 
   // Load the model.
-  private val graphPath = modelDir + "frozen_graph.pb"
-  private val graphDef = readAllBytesOrExit(Paths.get(graphPath))
+  private val graphDef = readAllBytesOrExit(Paths.get(modelDir, "frozen_graph.pb"))
   private val g = new Graph
   g.importGraphDef(graphDef)
   private val sess = new Session(g)
+
+  private val EPSILON: Float = 1e-8f
+
+  logWarning(s"TensorFlowModel: loaded")
 
   /** Assumes normalization done in training is taking ln() on the two cardinality columns. */
   def transformFeatures(xs: Array[Array[Double]]): Array[Array[Float]] = {
@@ -86,7 +89,12 @@ class TensorFlowModel(modelDir: String) extends Logging {
     // Close the Tensor to avoid resource leaks.
     output.close()
     // Output is of shape [1,1] which prevents us from calling output.floatValue().
-    predicted(0)(0)
+
+    // For
+    //   adam_128x3_lr1e-4_bs512_l2_disam_allData_noRootCost
+    //   adam_128x3_lr1e-3_bs512_disam_allData_noRootCost
+    // Forgot to subtract epsilon in graph.
+    predicted(0)(0) - EPSILON
   }
 
 
