@@ -975,6 +975,13 @@ object SQLConf {
       .booleanConf
       .createWithDefault(false)
 
+  val JOIN_REORDER_REPORT_SUBOPT =
+    buildConf("spark.sql.cbo.joinReorder.reportSubopt")
+      .internal()
+      .doc("Whether to run DP baseline too when NN is used for inference.  Can be slow.")
+      .booleanConf
+      .createWithDefault(false)
+
   val JOIN_REORDER_DP_THRESHOLD =
     buildConf("spark.sql.cbo.joinReorder.dp.threshold")
       .doc("The maximum number of joined nodes allowed in the dynamic programming algorithm.")
@@ -1501,6 +1508,8 @@ class SQLConf extends Serializable with Logging {
   def joinReorderDumpTrainingData: String = getConf(SQLConf.JOIN_REORDER_DUMP_TRAINING_DATA)
 
   def joinReorderUseLinearCost: Boolean = getConf(SQLConf.JOIN_REORDER_USE_LINEAR_COST)
+
+  def joinReorderReportSubopt: Boolean = getConf(SQLConf.JOIN_REORDER_REPORT_SUBOPT)
 
   def joinReorderDPThreshold: Int = getConf(SQLConf.JOIN_REORDER_DP_THRESHOLD)
 

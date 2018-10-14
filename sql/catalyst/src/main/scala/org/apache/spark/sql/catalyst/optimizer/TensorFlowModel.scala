@@ -20,58 +20,32 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import java.io.IOException
 import java.nio.file.{Files, Path, Paths}
-import java.util
 
 import org.apache.spark.internal.Logging
 import org.tensorflow.{Graph, Session, Tensors}
 
 class TensorFlowModel(modelDir: String) extends Logging {
 
-  val CARDINALITY_COLUMNS = Seq(42, 85)
+  // TODO: it'd be good to move the transform in-graph.
+  // val CARDINALITY_COLUMNS = Seq(42, 85)  // JOB
+  val CARDINALITY_COLUMNS = Seq(72, 145) // TPC-DS
 
   logWarning(s"TensorFlowModel, loading from $modelDir, card columns $CARDINALITY_COLUMNS")
 
   // Load the model.
   private val graphDef = readAllBytesOrExit(Paths.get(modelDir, "frozen_graph.pb"))
-  private val g = new Graph
-  g.importGraphDef(graphDef)
-  private val sess = new Session(g)
 
+  private val g = new Graph
+  private val sess = new Session(g)
+  g.importGraphDef(graphDef)
   private val EPSILON: Float = 1e-8f
 
   logWarning(s"TensorFlowModel: loaded")
 
-  /** Assumes normalization done in training is taking ln() on the two cardinality columns. */
-  def transformFeatures(xs: Array[Array[Double]]): Array[Array[Float]] = {
-//    logInfo(s"xs ${xs.map(_.mkString(",")).mkString("\n")}")
-    val ret = xs.map { arr =>
-      CARDINALITY_COLUMNS.foreach { col => arr(col) = Math.log(arr(col)).toFloat }
-      arr.map(_.toFloat)
-    }
-//    logInfo(s"ret ${ret.map(_.mkString(",")).mkString("\n")}")
-    ret
-  }
-
-  def transform(xs: Array[Array[Float]]): Array[Array[Float]] = {
-    xs.foreach { arr =>
-      CARDINALITY_COLUMNS.foreach { col => arr(col) = Math.log(arr(col)).toFloat }
-    }
-    xs
-  }
-
   def run(featVec: Seq[Float]): Float = {
-//    logInfo("In TensorFlowModel: run()")
-
-    //    val featVec = Array(
-    //      Array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1380035.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1337140.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-    //      Array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1467823.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1337140.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
-    //      Array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1467823.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1337140.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
-    //      Array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1380035.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2528312.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
-    //    )
     val feats = Array(featVec.toArray)
     val floatTensor = Tensors.create(transform(feats))
     val predicted = Array.ofDim[Float](feats.length, 1)
-//    println("input shape: " + util.Arrays.toString(floatTensor.shape()))
 
     val output = sess.runner
       .feed("IteratorGetNext", 0, floatTensor)
@@ -79,13 +53,7 @@ class TensorFlowModel(modelDir: String) extends Logging {
       .run
       .get(0)
 
-//    System.out.println("output shape: " + util.Arrays.toString(output.shape))
     output.copyTo(predicted)
-
-//    println("input: ")
-//    feats.foreach(v => println(util.Arrays.toString(v)))
-//    println("predicted: ")
-
     // Close the Tensor to avoid resource leaks.
     output.close()
     // Output is of shape [1,1] which prevents us from calling output.floatValue().
@@ -97,6 +65,13 @@ class TensorFlowModel(modelDir: String) extends Logging {
     predicted(0)(0) - EPSILON
   }
 
+  /** Assumes normalization done in training is taking ln() on the two cardinality columns. */
+  def transform(xs: Array[Array[Float]]): Array[Array[Float]] = {
+    xs.foreach { arr =>
+      CARDINALITY_COLUMNS.foreach { col => arr(col) = Math.log(arr(col)).toFloat }
+    }
+    xs
+  }
 
   private def readAllBytesOrExit(path: Path): Array[Byte] = {
     try return Files.readAllBytes(path)

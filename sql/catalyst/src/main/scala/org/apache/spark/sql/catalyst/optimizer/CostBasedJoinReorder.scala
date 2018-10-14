@@ -59,11 +59,21 @@ object LearningOptimizer extends Logging {
 
   def leafRelationsToOneHot(leafRelations: Seq[LogicalPlan],
                             allTableNamesSorted: Seq[String]): Seq[Float] = {
-    // Assume each distinct relation occurs at most twice in any query.
-    val buffer = mutable.Buffer.fill(allTableNamesSorted.size * 2)(0f)
+    // Assume each distinct relation occurs at most K times in any query.
+    // JOB: K = 2 suffices.
+    val K = 3
+
+    val buffer = mutable.Buffer.fill(allTableNamesSorted.size * K)(0f)
+    logInfo(s"leafRelations ${leafRelations.map(_.baseTableName.get)} ${leafRelations.map(_.disambiguationIndex)}")
+    logInfo(s"allTableNamesSorted ${allTableNamesSorted}")
+
     leafRelations.foreach { leaf =>
-      val index = allTableNamesSorted.indexOf(leaf.baseTableName.get) * 2
+      val index = allTableNamesSorted.indexOf(leaf.baseTableName.get) * K
+      if (index < 0) {
+        logWarning(s"$allTableNamesSorted ${leaf.baseTableName.get} $leaf")
+      }
       assert(index >= 0)
+      logInfo(s"disamb index ${leaf.disambiguationIndex} name ${leaf.baseTableName.get} leaf $leaf")
       assert(buffer(index + leaf.disambiguationIndex) == 0f)
       buffer(index + leaf.disambiguationIndex) = 1f
     }
@@ -196,28 +206,28 @@ case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
     }
   }
 
-  private def assignDisambiguationIndex(rootQuery: LogicalPlan) = {
-    var r = rootQuery.collectLeaves().map { leaf =>
-      (leaf, leaf.baseTableName.get, leaf.hashCode())
-    }
-    logInfo(s"leaf name hashcode $r")
-    // Sort by base table name first, then by hash code.
-    r = r.sortWith { case ((p1, n1, h1), (p2, n2, h2)) =>
-      if (n1 != n2) n1 < n2 else h1 < h2
-    }
-    var i = 0
-    while (i < r.size) {
-      var inc = 1
-      r(i)._1.disambiguationIndex = 0
-      if (i + 1 < r.size && r(i + 1)._2 == r(i)._2) {
-        // If next item has the same base table name.
-        r(i + 1)._1.disambiguationIndex = 1
-        inc = 2
-      }
-      assert(i + 2 >= r.size || r(i + 2)._2 != r(i)._2)
-      i += inc
-    }
-  }
+//  private def assignDisambiguationIndex(rootQuery: LogicalPlan) = {
+//    var r = rootQuery.collectLeaves().map { leaf =>
+//      (leaf, leaf.baseTableName.get, leaf.hashCode())
+//    }
+//    logInfo(s"leaf name hashcode $r")
+//    // Sort by base table name first, then by hash code.
+//    r = r.sortWith { case ((p1, n1, h1), (p2, n2, h2)) =>
+//      if (n1 != n2) n1 < n2 else h1 < h2
+//    }
+//    var i = 0
+//    while (i < r.size) {
+//      var inc = 1
+//      r(i)._1.disambiguationIndex = 0
+//      if (i + 1 < r.size && r(i + 1)._2 == r(i)._2) {
+//        // If next item has the same base table name.
+//        r(i + 1)._1.disambiguationIndex = 1
+//        inc = 2
+//      }
+//      assert(i + 2 >= r.size || r(i + 2)._2 != r(i)._2)
+//      i += inc
+//    }
+//  }
 
   private def reorder(plan: LogicalPlan, output: Seq[Attribute]): LogicalPlan = {
 
@@ -339,6 +349,8 @@ object JoinReorderDP extends PredicateHelper with Logging {
 
     def askDpForPlan(items: Seq[LogicalPlan]): (LogicalPlan, Float) = {
 
+      logInfo(s"all items $items")
+
       // Size == # relations.  Element at index i is the DP table for (i+1)-way join.
       val foundPlans = mutable.Buffer[JoinPlanMap](itemIndex.map {
         case (item, id) => Set(id) -> JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
@@ -394,7 +406,8 @@ object JoinReorderDP extends PredicateHelper with Logging {
                     newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
                   val predictedCost = LearningOptimizer.infer(featVec)
 
-                  logWarning(s"predicted cost $predictedCost, plan considered ${newJoinPlan}")
+                  logWarning(s"predicted cost $predictedCost, plan considered $newJoinPlan")
+                  assert(predictedCost >= Float.MinValue && predictedCost <= Float.MaxValue)
 
                   if (predictedCost < bestScore) {
                     newJoin = join
@@ -431,13 +444,14 @@ object JoinReorderDP extends PredicateHelper with Logging {
         JoinPlan(Set(id), item, Set.empty, Cost(0, 0))
       }: _*))
 
-      val (dpPlan, dpPlanCost) = askDpForPlan(items)
-
-      val d = (nnPlanCost - dpPlanCost) / dpPlanCost * 100
-      val subopt = nnPlanCost / dpPlanCost
-      logWarning(s"nn plan cost $nnPlanCost dp plan cost $dpPlanCost diff% $d subopt $subopt")
-      logWarning(s"nn plan $nnPlan")
-      logWarning(s"dp plan $dpPlan")
+      if (conf.joinReorderReportSubopt) {
+        val (dpPlan, dpPlanCost) = askDpForPlan(items)
+        val d = (nnPlanCost - dpPlanCost) / dpPlanCost * 100
+        val subopt = nnPlanCost / dpPlanCost
+        logWarning(s"nn plan cost $nnPlanCost dp plan cost $dpPlanCost diff% $d subopt $subopt")
+        logWarning(s"nn plan $nnPlan")
+        logWarning(s"dp plan $dpPlan")
+      }
 
       foundPlan = nnPlan
     }
@@ -695,8 +709,10 @@ object JoinReorderDP extends PredicateHelper with Logging {
     }
   }
 
-  lazy val allTables: Seq[TableIdentifier] =
-    sessionCatalog.listTables(SessionCatalog.DEFAULT_DATABASE)
+  // Note: for now assume a single database is in use throughout the lift time.
+  lazy val allTables: Seq[TableIdentifier] = {
+    sessionCatalog.listTables(sessionCatalog.getCurrentDatabase)
+  }
 
   lazy val allTableNamesSorted: Seq[String] = allTables.map(_.table).sorted
 

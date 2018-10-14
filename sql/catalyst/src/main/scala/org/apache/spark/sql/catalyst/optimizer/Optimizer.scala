@@ -108,6 +108,8 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
     // However, because we also use the analyzer to canonicalized queries (for view definition),
     // we do not eliminate subqueries or compute current time in the analyzer.
     Batch("Finish Analysis", Once,
+      // Depends on "SubqueryAlias s - SubqueryAlias l" structures, so must
+      // be run before EliminateSubqueryAliases.
       AssignDisambiguationIndex(sessionCatalog),
       EliminateSubqueryAliases,
       EliminateView,
