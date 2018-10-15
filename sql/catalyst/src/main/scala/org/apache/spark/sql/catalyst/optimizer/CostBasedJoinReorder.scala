@@ -31,12 +31,14 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.internal.SQLConf
 
+import scala.collection.mutable.ArrayBuffer
+
 
 object LearningOptimizer extends Logging {
 
   lazy val tfModel = new TensorFlowModel(SQLConf.get.joinReorderNeuralNetPath)
 
-  def infer(featVec: Seq[Float]): Float = {
+  def infer(featVec: Array[Array[Float]]): Array[Float] = {
     tfModel.run(featVec)
   }
 
@@ -53,19 +55,19 @@ object LearningOptimizer extends Logging {
   }
 
 //  def relNamesToOneHot(relNames: Seq[String],
-//                       allTableNamesSorted: Seq[String]): Seq[Float] = {
+//                       allTableNamesSorted: Seq[String]): Array[Float] = {
 //    allTableNamesSorted.map { name => if (relNames.contains(name)) 1f else 0f }
 //  }
 
   def leafRelationsToOneHot(leafRelations: Seq[LogicalPlan],
-                            allTableNamesSorted: Seq[String]): Seq[Float] = {
+                            allTableNamesSorted: Seq[String]): Array[Float] = {
     // Assume each distinct relation occurs at most K times in any query.
     // JOB: K = 2 suffices.
     val K = 3
 
-    val buffer = mutable.Buffer.fill(allTableNamesSorted.size * K)(0f)
+    val buffer = ArrayBuffer.fill(allTableNamesSorted.size * K)(0f)
     logInfo(s"leafRelations ${leafRelations.map(_.baseTableName.get)} ${leafRelations.map(_.disambiguationIndex)}")
-    logInfo(s"allTableNamesSorted ${allTableNamesSorted}")
+    logInfo(s"allTableNamesSorted $allTableNamesSorted")
 
     leafRelations.foreach { leaf =>
       val index = allTableNamesSorted.indexOf(leaf.baseTableName.get) * K
@@ -77,7 +79,7 @@ object LearningOptimizer extends Logging {
       assert(buffer(index + leaf.disambiguationIndex) == 0f)
       buffer(index + leaf.disambiguationIndex) = 1f
     }
-    buffer
+    buffer.toArray
   }
 
   /** Feature vector of a LogicalPlan (the label is calculated elsewhere):
@@ -88,9 +90,9 @@ object LearningOptimizer extends Logging {
     * Trajectory's final plan's all relations (1-hot)
     * */
   def featurize(plan: LogicalPlan,
-                rootRelsOneHot: Seq[Float],
+                rootRelsOneHot: Array[Float],
                 conf: SQLConf,
-                allTableNamesSorted: Seq[String]): Seq[Float] = {
+                allTableNamesSorted: Seq[String]): Array[Float] = {
     val result = findJoinSides(plan)
 
     if (result.isDefined) {
@@ -128,14 +130,14 @@ object LearningOptimizer extends Logging {
     } else {
       // This can be reached for, say, a leaf Project-Filter-Relation block -- a singleton relation.
       // The NN does not need to worry about singleton base relations.
-      Seq.empty
+      Array.empty
     }
   }
 
   /** Assumes "plan" is an optimal plan from some DP table.  Recursively collect training data. */
   def trainingData(plan: JoinPlan,
                    conf: SQLConf,
-                   allTableNamesSorted: Seq[String]): Seq[Seq[Float]] = {
+                   allTableNamesSorted: Seq[String]): ArrayBuffer[Array[Float]] = {
     // "plan" represents a terminal state, so use the same Q-val for all subplans.
 //    val qVal = (plan.rootCost(conf) + plan.planCost).combine()
     val qVal = plan.planCost.combine()
@@ -149,16 +151,16 @@ object LearningOptimizer extends Logging {
     val rootRelsOneHot =
       leafRelationsToOneHot(plan.plan.collectLeaves(), allTableNamesSorted)
 
-    val trainingData = mutable.Buffer.empty[Seq[Float]]
+    val trainingData = ArrayBuffer.empty[Array[Float]]
     trainingDataHelper(plan.plan, trainingData, qVal, rootRelsOneHot, conf, allTableNamesSorted)
 //    logInfo(s"filled trainingData ${trainingData.mkString("\n")}")
     trainingData
   }
 
   def trainingDataHelper(plan: LogicalPlan,
-                         trainingData: mutable.Buffer[Seq[Float]],
+                         trainingData: ArrayBuffer[Array[Float]],
                          qVal: Float,
-                         rootRelsOneHot: Seq[Float],
+                         rootRelsOneHot: Array[Float],
                          conf: SQLConf,
                          allTableNamesSorted: Seq[String]): Unit = {
     val featVec = featurize(plan, rootRelsOneHot, conf, allTableNamesSorted)
@@ -392,49 +394,87 @@ object JoinReorderDP extends PredicateHelper with Logging {
 //        val rootRelsOneHot = LearningOptimizer.leafRelationsToOneHot(items.map(_.plan.collectLeaves()))
         logWarning(s"Using NN for planning - rootRels $rootRels")
 
-        while (items.length > 1) {
-          var bestScore = Float.MaxValue
-          var bestLeft: JoinPlan = null
-          var bestRight: JoinPlan = null
-          var newJoin: Option[JoinPlan] = None
+        var candidates = ArrayBuffer.empty[(JoinPlan, Int, Int)]
+        var featureBatch = ArrayBuffer.empty[Array[Float]]
+        var bestScore = Float.MaxValue
+        var bestLeft: JoinPlan = null
+        var bestRight: JoinPlan = null
+        var newJoin: JoinPlan = null
 
+        while (items.length > 1) {
+          candidates.clear()
+          featureBatch.clear()
+          bestScore = Float.MaxValue
+          bestLeft = null
+          bestRight = null
+          newJoin = null
+
+//          for (i <- items.indices) {
+//            for (j <- items.indices) {
+//              buildJoin(items(i), items(j), conf, conditions, topOutputSet, filters) match {
+//                case join@Some(newJoinPlan) =>
+//                  val featVec = LearningOptimizer.featurize(
+//                    newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
+//                  val predictedCost = LearningOptimizer.infer(featVec)
+//
+//                  logWarning(s"predicted cost $predictedCost, plan considered $newJoinPlan")
+//                  assert(predictedCost >= Float.MinValue && predictedCost <= Float.MaxValue)
+//
+//                  if (predictedCost < bestScore) {
+//                    newJoin = join
+//                    bestScore = predictedCost
+//                    bestLeft = items(i)
+//                    bestRight = items(j)
+//                  }
+//
+//                case None =>
+//              }
+//
+//            }
+//          }
+
+          // Collect all score-able candidates.
           for (i <- items.indices) {
             for (j <- items.indices) {
               buildJoin(items(i), items(j), conf, conditions, topOutputSet, filters) match {
                 case join@Some(newJoinPlan) =>
                   val featVec = LearningOptimizer.featurize(
                     newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
-                  val predictedCost = LearningOptimizer.infer(featVec)
-
-                  logWarning(s"predicted cost $predictedCost, plan considered $newJoinPlan")
-                  assert(predictedCost >= Float.MinValue && predictedCost <= Float.MaxValue)
-
-                  if (predictedCost < bestScore) {
-                    newJoin = join
-                    bestScore = predictedCost
-                    bestLeft = items(i)
-                    bestRight = items(j)
-                  }
-
+                  featureBatch.append(featVec)
+                  candidates.append((newJoinPlan, i, j))
                 case None =>
               }
-
             }
           }
+          // Invoke neural net once.
+          val candidateScores = LearningOptimizer.infer(featureBatch.toArray)
+          // Choose plan with least predicted cost.
+          var bestLeftIdx = -1
+          var bestRightIdx = -1
+          for (i <- candidateScores.indices) {
+            if (candidateScores(i) < bestScore) {
+              bestScore = candidateScores(i)
+              newJoin = candidates(i)._1
+              bestLeftIdx = candidates(i)._2
+              bestRightIdx = candidates(i)._3
+            }
+          }
+          assert(bestLeftIdx != -1 && bestRightIdx != -1)
 
-          logWarning(s"adding join ${newJoin} into items")
+          logInfo(s"adding join $newJoin into items")
 
-          assert(bestLeft != null && bestRight != null)
+          bestLeft = items(bestLeftIdx)
+          bestRight = items(bestRightIdx)
           items -= bestLeft
           items -= bestRight
-          items.append(newJoin.get)
+          items.append(newJoin)
         }
 
+        // val finalPlanAnalyticalCost = (items.head.planCost + items.head.rootCost(conf)).combine()
         val finalPlanAnalyticalCost = items.head.planCost.combine()
         logInfo(s"final nn plan: plan cost $finalPlanAnalyticalCost root cost ${items.head.rootCost(conf).combine()}")
-//        val finalPlanAnalyticalCost = (items.head.planCost + items.head.rootCost(conf)).combine()
-        val predictedCostFinal = LearningOptimizer.infer(
-          LearningOptimizer.featurize(items.head.plan, rootRelsOneHot, conf, allTableNamesSorted))
+        val predictedCostFinal = LearningOptimizer.infer(Array(
+          LearningOptimizer.featurize(items.head.plan, rootRelsOneHot, conf, allTableNamesSorted)))(0)
         val diff = (predictedCostFinal - finalPlanAnalyticalCost) / finalPlanAnalyticalCost * 100
         logWarning(s"produced plan: analytical cost $finalPlanAnalyticalCost predicted $predictedCostFinal diff% $diff")
         (items.head.plan, finalPlanAnalyticalCost)

@@ -19,10 +19,11 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import java.io.IOException
+import java.nio.FloatBuffer
 import java.nio.file.{Files, Path, Paths}
 
 import org.apache.spark.internal.Logging
-import org.tensorflow.{Graph, Session, Tensors}
+import org.tensorflow.{Graph, Session, Tensor, Tensors}
 
 class TensorFlowModel(modelDir: String) extends Logging {
 
@@ -42,27 +43,33 @@ class TensorFlowModel(modelDir: String) extends Logging {
 
   logWarning(s"TensorFlowModel: loaded")
 
-  def run(featVec: Seq[Float]): Float = {
-    val feats = Array(featVec.toArray)
-    val floatTensor = Tensors.create(transform(feats))
-    val predicted = Array.ofDim[Float](feats.length, 1)
-
+  def run(featureBatch: Array[Array[Float]]): Array[Float] = {
+    // NOTE: https://github.com/tensorflow/tensorflow/issues/8244 indicates this might be
+    // a very slow call; may want to look into alternatives.
+    val floatTensor = Tensors.create(transform(featureBatch))
     val output = sess.runner
       .feed("IteratorGetNext", 0, floatTensor)
       .fetch("out_denormalized/Exp", 0)
       .run
       .get(0)
 
-    output.copyTo(predicted)
+    val predicted = FloatBuffer.allocate(featureBatch.length)
+    output.writeTo(predicted)
+//    val predicted = Array.ofDim[Float](featureBatch.length, 1)
+//    output.copyTo(predicted)
     // Close the Tensor to avoid resource leaks.
     output.close()
-    // Output is of shape [1,1] which prevents us from calling output.floatValue().
+    floatTensor.close()
 
     // For
     //   adam_128x3_lr1e-4_bs512_l2_disam_allData_noRootCost
     //   adam_128x3_lr1e-3_bs512_disam_allData_noRootCost
     // Forgot to subtract epsilon in graph.
-    predicted(0)(0) - EPSILON
+    var arr = predicted.array()
+    for (i <- 0 until arr.length) {
+      arr(i) -= EPSILON
+    }
+    arr
   }
 
   /** Assumes normalization done in training is taking ln() on the two cardinality columns. */
