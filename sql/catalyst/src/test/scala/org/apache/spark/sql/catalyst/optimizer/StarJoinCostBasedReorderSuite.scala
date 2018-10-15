@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.analysis.EmptyFunctionRegistry
+import org.apache.spark.sql.catalyst.catalog.{InMemoryCatalog, SessionCatalog}
 import org.apache.spark.sql.catalyst.dsl.expressions._
 import org.apache.spark.sql.catalyst.dsl.plans._
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap}
@@ -39,7 +41,8 @@ class StarJoinCostBasedReorderSuite extends PlanTest with StatsEstimationTestBas
         ColumnPruning,
         CollapseProject) ::
       Batch("Join Reorder", Once,
-        CostBasedJoinReorder) :: Nil
+        CostBasedJoinReorder(
+          new SessionCatalog(new InMemoryCatalog, EmptyFunctionRegistry, conf))) :: Nil
   }
 
   var originalConfCBOEnabled = false
