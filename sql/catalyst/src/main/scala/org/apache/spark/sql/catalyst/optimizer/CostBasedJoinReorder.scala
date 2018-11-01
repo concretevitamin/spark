@@ -20,17 +20,17 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import java.io.{BufferedWriter, File, FileWriter}
 
-import scala.collection.mutable
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.SessionCatalog
-import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeSet, Expression, PredicateHelper}
+import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeSet, EqualTo, Expression, PredicateHelper}
 import org.apache.spark.sql.catalyst.optimizer.JoinReorderDP.JoinPlan
-import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, JoinType}
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, JoinType}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.internal.SQLConf
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 
@@ -139,8 +139,8 @@ object LearningOptimizer extends Logging {
                    conf: SQLConf,
                    allTableNamesSorted: Seq[String]): ArrayBuffer[Array[Float]] = {
     // "plan" represents a terminal state, so use the same Q-val for all subplans.
-//    val qVal = (plan.rootCost(conf) + plan.planCost).combine()
-    val qVal = plan.planCost.combine()
+    val qVal = (plan.rootCost(conf) + plan.planCost).combine()
+//    val qVal = plan.planCost.combine()
 
     // The optimality of subplans is defined w.r.t. to joining these "root" rels.
     // In other words, some subplan here may no longer be optimal if the goal is to join some other
@@ -208,36 +208,16 @@ case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
     }
   }
 
-//  private def assignDisambiguationIndex(rootQuery: LogicalPlan) = {
-//    var r = rootQuery.collectLeaves().map { leaf =>
-//      (leaf, leaf.baseTableName.get, leaf.hashCode())
-//    }
-//    logInfo(s"leaf name hashcode $r")
-//    // Sort by base table name first, then by hash code.
-//    r = r.sortWith { case ((p1, n1, h1), (p2, n2, h2)) =>
-//      if (n1 != n2) n1 < n2 else h1 < h2
-//    }
-//    var i = 0
-//    while (i < r.size) {
-//      var inc = 1
-//      r(i)._1.disambiguationIndex = 0
-//      if (i + 1 < r.size && r(i + 1)._2 == r(i)._2) {
-//        // If next item has the same base table name.
-//        r(i + 1)._1.disambiguationIndex = 1
-//        inc = 2
-//      }
-//      assert(i + 2 >= r.size || r(i + 2)._2 != r(i)._2)
-//      i += inc
-//    }
-//  }
-
   private def reorder(plan: LogicalPlan, output: Seq[Attribute]): LogicalPlan = {
-
-//    assignDisambiguationIndex(plan)
-
-//    logInfo(s"names and idx ${plan.collectLeaves().map(r => (r.baseTableName, r.disambiguationIndex))}")
-
-    val (items, conditions) = extractInnerJoins(plan)
+    // Hack: keep EqualTo predicates only since extractInnerJoins() sometimes
+    // returns conjunctions/disjunctions that cause cross joins.
+    val (items, conditionsBuggy) = extractInnerJoins(plan)
+    val conditions = conditionsBuggy.filter(_.isInstanceOf[EqualTo])
+    if (conditions.size != conditionsBuggy.size) {
+      logDebug(
+        s"buggyConditions.size ${conditionsBuggy.size} conds.size ${conditions.size}")
+      logDebug(s"before $conditionsBuggy after $conditions")
+    }
 
     logInfo(s"item names and idx ${items.flatMap(_.collectLeaves()).map(r => (r.baseTableName, r.disambiguationIndex))}")
 
@@ -371,8 +351,8 @@ object JoinReorderDP extends PredicateHelper with Logging {
 
       logInfo(s"final dp plan: ${foundPlans.last.head._2}")
       logWarning(s"final dp planCost ${foundPlans.last.head._2.planCost} scalar ${foundPlans.last.head._2.planCost.combine()}")
-      (foundPlans.last.head._2.plan, foundPlans.last.head._2.planCost.combine())
-//      (foundPlans.last.head._2.planCost + foundPlans.last.head._2.rootCost(conf)).combine())
+      (foundPlans.last.head._2.plan, //foundPlans.last.head._2.planCost.combine())
+      (foundPlans.last.head._2.planCost + foundPlans.last.head._2.rootCost(conf)).combine())
     }
 
     if (conf.joinReorderNeuralNetPath.isEmpty) {
@@ -435,14 +415,21 @@ object JoinReorderDP extends PredicateHelper with Logging {
 
           // Collect all score-able candidates.
           for (i <- items.indices) {
-            for (j <- items.indices) {
-              buildJoin(items(i), items(j), conf, conditions, topOutputSet, filters) match {
-                case join@Some(newJoinPlan) =>
-                  val featVec = LearningOptimizer.featurize(
-                    newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
-                  featureBatch.append(featVec)
-                  candidates.append((newJoinPlan, i, j))
-                case None =>
+            for (j <- (i + 1) until items.length) {
+              val l = items(i)
+              val r = items(j)
+              val leftBase = l.plan.collectLeaves().flatMap(_.baseTableName)
+              val rightBase = r.plan.collectLeaves().flatMap(_.baseTableName)
+              // Let's not do self-joins (i != j can still mean same base relation).
+              if (leftBase != rightBase) {
+                buildJoin(l, r, conf, conditions, topOutputSet, filters) match {
+                  case join@Some(newJoinPlan) =>
+                    val featVec = LearningOptimizer.featurize(
+                      newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
+                    featureBatch.append(featVec)
+                    candidates.append((newJoinPlan, i, j))
+                  case None =>
+                }
               }
             }
           }
@@ -470,8 +457,9 @@ object JoinReorderDP extends PredicateHelper with Logging {
           items.append(newJoin)
         }
 
-        // val finalPlanAnalyticalCost = (items.head.planCost + items.head.rootCost(conf)).combine()
-        val finalPlanAnalyticalCost = items.head.planCost.combine()
+
+        val finalPlanAnalyticalCost = (items.head.planCost + items.head.rootCost(conf)).combine()
+//        val finalPlanAnalyticalCost = items.head.planCost.combine()
         logInfo(s"final nn plan: plan cost $finalPlanAnalyticalCost root cost ${items.head.rootCost(conf).combine()}")
         val predictedCostFinal = LearningOptimizer.infer(Array(
           LearningOptimizer.featurize(items.head.plan, rootRelsOneHot, conf, allTableNamesSorted)))(0)
@@ -519,7 +507,7 @@ object JoinReorderDP extends PredicateHelper with Logging {
     retval
   }
 
-  /** Dumps appropriately calculated/featurized training data _from one particular query_. */
+  /** Dumps appropriately calculated/featurized training data from one particular query. */
   private def dumpLearningData(maps: mutable.Buffer[JoinReorderDP.JoinPlanMap],
                                trainingDataPath: String): Unit = {
     logInfo(s"maps.size ${maps.size}")
@@ -706,6 +694,9 @@ object JoinReorderDP extends PredicateHelper with Logging {
       // This also significantly reduces the search space.
       return None
     }
+    logInfo(s"joinConds $joinConds")
+    logInfo(s"  l $onePlan")
+    logInfo(s"  r $otherPlan")
 
     // Put the deeper side on the left, tend to build a left-deep tree.
     val (left, right) = if (oneJoinPlan.itemIds.size >= otherJoinPlan.itemIds.size) {
