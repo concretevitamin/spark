@@ -25,9 +25,11 @@ import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.SessionCatalog
 import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeSet, EqualTo, Expression, PredicateHelper}
 import org.apache.spark.sql.catalyst.optimizer.JoinReorderDP.JoinPlan
+import org.apache.spark.sql.catalyst.planning.ExtractEquiJoinKeys
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, JoinType}
 import org.apache.spark.sql.catalyst.rules.Rule
+//import org.apache.spark.sql.execution.SparkStrategies
 import org.apache.spark.sql.internal.SQLConf
 
 import scala.collection.mutable
@@ -44,7 +46,7 @@ object LearningOptimizer extends Logging {
 
   // For >= 2-relation sets, root can either be Project or a Join.
   // Match on logical Join operators so we have correct left/right sides to work with.
-  private def findJoinSides(p: LogicalPlan): Option[(LogicalPlan, LogicalPlan)] = {
+  def findJoinSides(p: LogicalPlan): Option[(LogicalPlan, LogicalPlan)] = {
     p match {
       case p: Project => findJoinSides(p.child)
       case j: Join =>
@@ -190,6 +192,7 @@ case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
   private def conf = SQLConf.get
 
   def apply(plan: LogicalPlan): LogicalPlan = {
+    logInfo(s"CBO entry ${plan.semanticHash()} ${plan.hashCode()}")
     if (!conf.cboEnabled || !conf.joinReorderEnabled) {
       plan
     } else {
@@ -202,9 +205,29 @@ case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
           reorder(p, p.output)
       }
       // After reordering is finished, convert OrderedJoin back to Join
-      result transformDown {
-        case OrderedJoin(left, right, jt, cond) => Join(left, right, jt, cond)
+      val joinAnnotations = mutable.Buffer[Option[JoinAlgorithm]]()
+
+      var newResult = result transformDown {
+        case OrderedJoin(left, right, jt, cond, joinAlgorithm) =>
+          val j = Join(left, right, jt, cond)
+          joinAnnotations += joinAlgorithm
+          j
       }
+
+      var i = 0
+      newResult = newResult.transformDown {
+        case j@Join(_,_,_,_) =>
+          j.joinAlgorithm = joinAnnotations(i)
+          i += 1
+          j
+      }
+      // The following is just for printing purposes.
+      newResult.transform {
+        case j@Join(_,_,_,_) =>
+          logInfo(s"*Logical: algo ${j.joinAlgorithm} ; hash ${j.semanticHash()}  ${j.hashCode()} ; ${j.treeString};")
+          j
+      }
+      newResult
     }
   }
 
@@ -262,7 +285,7 @@ case class CostBasedJoinReorder(sessionCatalog: SessionCatalog)
     case j @ Join(left, right, jt: InnerLike, Some(cond)) =>
       val replacedLeft = replaceWithOrderedJoin(left)
       val replacedRight = replaceWithOrderedJoin(right)
-      OrderedJoin(replacedLeft, replacedRight, jt, Some(cond))
+      OrderedJoin(replacedLeft, replacedRight, jt, Some(cond), j.joinAlgorithm)
     case p @ Project(projectList, j @ Join(_, _, _: InnerLike, Some(cond))) =>
       p.copy(child = replaceWithOrderedJoin(j))
     case _ =>
@@ -275,7 +298,8 @@ case class OrderedJoin(
     left: LogicalPlan,
     right: LogicalPlan,
     joinType: JoinType,
-    condition: Option[Expression]) extends BinaryNode {
+    condition: Option[Expression],
+    joinAlgorithm: Option[JoinAlgorithm]) extends BinaryNode {
   override def output: Seq[Attribute] = left.output ++ right.output
 }
 
@@ -588,7 +612,7 @@ object JoinReorderDP extends PredicateHelper with Logging {
   //  bw.write(text)
   //  bw.close()
 
-
+  val allJoinAlgorithms: Seq[JoinAlgorithm] = HashJoin :: SortMergeJoin :: NestedLoopJoin :: Nil
 
   /** Find all possible plans at the next level, based on existing levels. */
   private def searchLevel(
@@ -620,17 +644,24 @@ object JoinReorderDP extends PredicateHelper with Logging {
         otherSideCandidates.foreach { otherSidePlan =>
           buildJoin(oneSidePlan, otherSidePlan, conf, conditions, topOutput, filters) match {
             case Some(newJoinPlan) =>
-              // Check if it's the first plan for the item set, or it's a better plan than
-              // the existing one due to lower cost.
-              val existingPlan = nextLevel.get(newJoinPlan.itemIds)
-              if (existingPlan.isEmpty || newJoinPlan.betterThan(existingPlan.get, conf)) {
-//                if (existingPlan.isDefined && newJoinPlan.betterThan(existingPlan.get, conf)) {
-//                  // A better plan.  Let's log.
-//                  logInfo(s"existingPlan ${existingPlan.get.plan} planCost ${existingPlan.get.planCost} rootCost ${existingPlan.get.rootCost(conf)}")
-//                  logInfo(s"new ${newJoinPlan.plan} planCost ${newJoinPlan.planCost} rootCost ${newJoinPlan.rootCost(conf)}")
-//                }
-                nextLevel.update(newJoinPlan.itemIds, newJoinPlan)
+              allJoinAlgorithms.foreach { joinAlgo =>
+                // TODO(zongheng): check for algo eligibility?  See JoinSelection's criteria.
+
+                // Check if it's the first plan for the item set, or it's a better plan than
+                // the existing one due to lower cost.
+                val existingPlan = nextLevel.get(newJoinPlan.itemIds)
+                if (existingPlan.isEmpty || newJoinPlan.betterThan(existingPlan.get, conf, Some(joinAlgo))) {
+                  newJoinPlan.annotateJoinAlgorithm(joinAlgo)
+                  nextLevel.update(newJoinPlan.itemIds, newJoinPlan)
+
+                  if (existingPlan.isDefined && newJoinPlan.betterThan(existingPlan.get, conf, Some(joinAlgo))) {
+                    // A better plan.  Let's log.
+                    logInfo(s"existingPlan ${existingPlan.get.plan} planCost ${existingPlan.get.planCost} rootCost ${existingPlan.get.rootCost(conf)}")
+                    logInfo(s"new ${newJoinPlan.plan} planCost ${newJoinPlan.planCost} rootCost ${newJoinPlan.rootCost(conf)}")
+                  }
+                }
               }
+
             case None =>
           }
         }
@@ -794,29 +825,92 @@ object JoinReorderDP extends PredicateHelper with Logging {
       joinConds: Set[Expression],
       planCost: Cost) {
 
+    var joinAlgorithm: Option[JoinAlgorithm] = None
+
+    /** Attach an algorithm type to both this class (JoinPlan) and the underlying Join node. */
+    def annotateJoinAlgorithm(joinAlgorithm: JoinAlgorithm): Unit = {
+      this.joinAlgorithm = Some(joinAlgorithm)
+      var joinNode = plan
+      if (plan.isInstanceOf[Project]) {
+        joinNode = plan.children.head
+      }
+      assert(joinNode.isInstanceOf[Join])
+//      assert(joinNode.asInstanceOf[Join].joinAlgorithm.isEmpty)
+      joinNode.asInstanceOf[Join].joinAlgorithm = this.joinAlgorithm
+    }
+
     /** Get the cost of the root node of this plan tree. */
     def rootCost(conf: SQLConf): Cost = {
+      rootCost(conf, this.joinAlgorithm)
+    }
+
+    def rootCost(conf: SQLConf, joinAlgorithm: Option[JoinAlgorithm]): Cost = {
       if (itemIds.size > 1) {
         val rootStats = plan.stats
-        Cost(rootStats.rowCount.get, rootStats.sizeInBytes)
+        assert(joinAlgorithm.isDefined)  // Trying to tag algo at logical stage.
+        Cost(BigInt(unitlessOpCost(joinAlgorithm).toLong), rootStats.sizeInBytes)
       } else {
         // If the plan is a leaf item, it has zero cost.
         Cost(0, 0)
       }
     }
 
-    def betterThan(other: JoinPlan, conf: SQLConf): Boolean = {
-      if (!conf.joinReorderUseLinearCost) {
-        if (other.planCost.card == 0 || other.planCost.size == 0) {
-          false
-        } else {
-          val relativeRows = BigDecimal(this.planCost.card) / BigDecimal(other.planCost.card)
-          val relativeSize = BigDecimal(this.planCost.size) / BigDecimal(other.planCost.size)
-          relativeRows * conf.joinReorderCardWeight +
-            relativeSize * (1 - conf.joinReorderCardWeight) < 1
-        }
-      } else {
-        this.planCost.combine() < other.planCost.combine()
+    def unitlessOpCost(): Float = unitlessOpCost(joinAlgorithm)
+
+    // TODO: revisit these formulas.
+    def unitlessOpCost(joinAlgo: Option[JoinAlgorithm]): Float = {
+      val (left, right) = LearningOptimizer.findJoinSides(this.plan).get
+      val leftCard = left.stats.rowCount.get
+      val rightCard = right.stats.rowCount.get
+      joinAlgo match {
+        case None =>
+          assert(false)
+          0f
+        case Some(HashJoin) =>
+          3 * (leftCard + rightCard).toFloat
+        case Some(SortMergeJoin) =>
+          val l = leftCard.toFloat
+          val r = rightCard.toFloat
+          (l * Math.log(l) + r * Math.log(r)).toFloat
+        case Some(NestedLoopJoin) =>
+          Math.min((leftCard + leftCard * rightCard).toFloat,
+            (rightCard + rightCard * leftCard).toFloat)
+        case Some(CartesianProductJoin) =>
+          (leftCard * rightCard).toFloat
+      }
+    }
+
+    def betterThan(other: JoinPlan, conf: SQLConf, myTentativeAlgo: Option[JoinAlgorithm]): Boolean = {
+      assert(other.joinAlgorithm.isDefined)
+
+      myTentativeAlgo match {
+        case None =>
+          if (!conf.joinReorderUseLinearCost) {
+            if (other.planCost.card == 0 || other.planCost.size == 0) {
+              false
+            } else {
+              val relativeRows = BigDecimal(this.planCost.card) / BigDecimal(other.planCost.card)
+              val relativeSize = BigDecimal(this.planCost.size) / BigDecimal(other.planCost.size)
+              relativeRows * conf.joinReorderCardWeight +
+                relativeSize * (1 - conf.joinReorderCardWeight) < 1
+            }
+          } else {
+            this.planCost.combine() < other.planCost.combine()
+          }
+        case Some(_) =>
+          val myBaseCost = (this.planCost + this.rootCost(conf, myTentativeAlgo)).combine()
+          val otherBaseCost = (other.planCost + other.rootCost(conf)).combine()
+          val myOpCost = unitlessOpCost(myTentativeAlgo)
+          val otherOpCost = other.unitlessOpCost()
+          logInfo(s"myBaseCost $myBaseCost myOpCost $myOpCost otherBaseCost $otherBaseCost otherOpCost $otherOpCost")
+          logInfo(s"new algo $myTentativeAlgo existing algo ${other.joinAlgorithm}")
+          // TODO: careful about magnitude mismatch.
+//          (myOpCost + myBaseCost) < (otherOpCost + otherBaseCost)
+//          myOpCost < otherOpCost
+
+          // debugging
+          myBaseCost < otherBaseCost
+
       }
     }
   }

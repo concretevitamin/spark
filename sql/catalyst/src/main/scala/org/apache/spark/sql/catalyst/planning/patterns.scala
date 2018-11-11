@@ -103,6 +103,7 @@ object ExtractEquiJoinKeys extends Logging with PredicateHelper {
 
   def unapply(plan: LogicalPlan): Option[ReturnType] = plan match {
     case join @ Join(left, right, joinType, condition) =>
+//      logInfo(s"In Physical Planning: join algo ${join.joinAlgorithm} ; ${plan.treeString}")
       logDebug(s"Considering join on: $condition")
       // Find equi-join predicates that can be evaluated before the join, and thus can be used
       // as join keys.

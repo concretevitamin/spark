@@ -23,6 +23,7 @@ import com.esotericsoftware.kryo.{Kryo, KryoSerializable}
 import com.esotericsoftware.kryo.io.{Input, Output}
 
 import org.apache.spark.{SparkConf, SparkEnv, SparkException}
+import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.MEMORY_OFFHEAP_ENABLED
 import org.apache.spark.memory.{MemoryConsumer, StaticMemoryManager, TaskMemoryManager}
 import org.apache.spark.sql.catalyst.InternalRow
@@ -620,8 +621,9 @@ private[execution] final class LongToUnsafeRowMap(val mm: TaskMemoryManager, cap
     val neededNumWords = (cursor - Platform.LONG_ARRAY_OFFSET + 8 + inputRowSize + 7) / 8
     if (neededNumWords > page.length) {
       if (neededNumWords > (1 << 30)) {
+        val size = (8 * neededNumWords).toFloat / (1<<30)
         throw new UnsupportedOperationException(
-          "Can not build a HashedRelation that is larger than 8G")
+          s"Can not build a HashedRelation that is larger than 8G: $size GB")
       }
       val newNumWords = math.max(neededNumWords, math.min(page.length * 2, 1 << 30))
       ensureAcquireMemory(newNumWords * 8L)
@@ -874,7 +876,7 @@ private[joins] object LongHashedRelation {
 
 /** The HashedRelationBroadcastMode requires that rows are broadcasted as a HashedRelation. */
 private[execution] case class HashedRelationBroadcastMode(key: Seq[Expression])
-  extends BroadcastMode {
+  extends BroadcastMode with Logging {
 
   override def transform(rows: Array[InternalRow]): HashedRelation = {
     transform(rows.iterator, Some(rows.length))
@@ -883,6 +885,7 @@ private[execution] case class HashedRelationBroadcastMode(key: Seq[Expression])
   override def transform(
       rows: Iterator[InternalRow],
       sizeHint: Option[Long]): HashedRelation = {
+    logInfo(s"sizeHint in HashedRelationBroadcastMode $sizeHint (# rows)")
     sizeHint match {
       case Some(numRows) =>
         HashedRelation(rows, canonicalized.key, numRows.toInt)

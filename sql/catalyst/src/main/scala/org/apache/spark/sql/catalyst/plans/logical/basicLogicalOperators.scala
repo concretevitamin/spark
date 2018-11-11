@@ -275,12 +275,38 @@ case class Union(children: Seq[LogicalPlan]) extends LogicalPlan {
   }
 }
 
+// Physical:
+// BoardcastHashJoinExec,
+// BroadcastNestedLoopJoinExec,
+// CartesianProductExec,
+// ShuffledHashJoinExec,
+// SortMergeJoinExec
+
+sealed abstract class JoinAlgorithm
+case object SortMergeJoin extends JoinAlgorithm
+case object HashJoin extends JoinAlgorithm
+case object NestedLoopJoin extends JoinAlgorithm
+case object CartesianProductJoin extends JoinAlgorithm
+
 case class Join(
     left: LogicalPlan,
     right: LogicalPlan,
     joinType: JoinType,
     condition: Option[Expression])
   extends BinaryNode with PredicateHelper {
+
+  def this(
+    left: LogicalPlan,
+    right: LogicalPlan,
+    joinType: JoinType,
+    condition: Option[Expression], joinAlgo: Option[JoinAlgorithm]) = {
+    this(left, right, joinType, condition)
+    joinAlgorithm = joinAlgo
+  }
+
+  var joinAlgorithm: Option[JoinAlgorithm] = None
+
+  override protected final def otherCopyArgs: Seq[AnyRef] = joinAlgorithm :: Nil
 
   override def output: Seq[Attribute] = {
     joinType match {
