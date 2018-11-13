@@ -65,7 +65,11 @@ case class LogicalRelation(
     case _ =>  // Do nothing.
   }
 
-  override def simpleString: String = s"Relation[${Utils.truncatedString(output, ",")}] $relation"
+  override def simpleString: String = if (this.baseTableName.isEmpty) {
+    s"Relation[${Utils.truncatedString(output, ",")}] $relation"
+  } else {
+    s"Relation(${this.baseTableName.get})[${Utils.truncatedString(output, ",")}] $relation"
+  }
 }
 
 object LogicalRelation {

@@ -288,6 +288,7 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
               assert(RowOrdering.isOrderable(leftKeys))
               result = joins.SortMergeJoinExec(
                 leftKeys, rightKeys, joinType, condition, planLater(left), planLater(right)) :: Nil
+              logInfo("case 5")
             }
             case NestedLoopJoin =>
               // Allows NLJ even if equi joins.
@@ -295,16 +296,19 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
                 val buildSide = broadcastSideByHints(joinType, left, right)
                 result = joins.BroadcastNestedLoopJoinExec(
                   planLater(left), planLater(right), buildSide, joinType, condition) :: Nil
+                logInfo("case 6 (nlj)")
               } else if (canBroadcastBySizes(joinType, left, right)) {
                 val buildSide = broadcastSideBySizes(joinType, left, right)
                 result = joins.BroadcastNestedLoopJoinExec(
                   planLater(left), planLater(right), buildSide, joinType, condition) :: Nil
+                logInfo("case 7 (nlj)")
               } else {
                 val buildSide = broadcastSide(
                   left.stats.hints.broadcast, right.stats.hints.broadcast, left, right)
                 // This join could be very slow or OOM
                 result = joins.BroadcastNestedLoopJoinExec(
                   planLater(left), planLater(right), buildSide, joinType, condition) :: Nil
+                logInfo("case 8 (nlj)")
               }
             case CartesianProductJoin =>
               assert(false)
@@ -317,7 +321,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           logInfo(s"canBuildLocalHashMap(left) ${canBuildLocalHashMap(left)}")
           logInfo(s"canBuildLocalHashMap(right) ${canBuildLocalHashMap(right)}")
           logInfo(s"conf.preferSortMergeJoin ${conf.preferSortMergeJoin}")
-          logInfo(s"left/right sizeInBytes: ${left.stats.sizeInBytes} ${right.stats.sizeInBytes}")
+          logInfo(s"left/right stats: ${left.stats} ${right.stats}")
+          logInfo(s"left/right rels: ${left.collectLeaves().map(_.baseTableName.get).toSeq} ${right.collectLeaves().map(_.baseTableName.get).toSeq}")
           logInfo(s"isOrderable?: ${RowOrdering.isOrderable(leftKeys)} ${RowOrdering.isOrderable(rightKeys)}")
           assert(result != null)
           result

@@ -28,8 +28,8 @@ import org.tensorflow.{Graph, Session, Tensor, Tensors}
 class TensorFlowModel(modelDir: String) extends Logging {
 
   // TODO: it'd be good to move the transform in-graph.
-  // val CARDINALITY_COLUMNS = Seq(42, 85)  // JOB
-  val CARDINALITY_COLUMNS = Seq(72, 145) // TPC-DS
+   val CARDINALITY_COLUMNS = Seq(42, 85)  // JOB
+//  val CARDINALITY_COLUMNS = Seq(72, 145)  // TPC-DS
 
   logWarning(s"TensorFlowModel, loading from $modelDir, card columns $CARDINALITY_COLUMNS")
 

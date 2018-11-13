@@ -27,9 +27,9 @@ import org.apache.spark.sql.catalyst.expressions.{And, Attribute, AttributeSet, 
 import org.apache.spark.sql.catalyst.optimizer.JoinReorderDP.JoinPlan
 import org.apache.spark.sql.catalyst.planning.ExtractEquiJoinKeys
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.catalyst.plans.logical.UnaryNode
 import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, JoinType}
 import org.apache.spark.sql.catalyst.rules.Rule
-//import org.apache.spark.sql.execution.SparkStrategies
 import org.apache.spark.sql.internal.SQLConf
 
 import scala.collection.mutable
@@ -64,8 +64,9 @@ object LearningOptimizer extends Logging {
   def leafRelationsToOneHot(leafRelations: Seq[LogicalPlan],
                             allTableNamesSorted: Seq[String]): Array[Float] = {
     // Assume each distinct relation occurs at most K times in any query.
-    // JOB: K = 2 suffices.
-    val K = 3
+    // JOB: K = 2.
+    // TPCDS: K = 3.
+    val K = 2
 
     val buffer = ArrayBuffer.fill(allTableNamesSorted.size * K)(0f)
     logInfo(s"leafRelations ${leafRelations.map(_.baseTableName.get)} ${leafRelations.map(_.disambiguationIndex)}")
@@ -84,56 +85,75 @@ object LearningOptimizer extends Logging {
     buffer.toArray
   }
 
+//  def featurize(plan: LogicalPlan,
+//    rootRelsOneHot: Array[Float],
+//    conf: SQLConf,
+//    allTableNamesSorted: Seq[String]): Array[Float] = featurize(plan, rootRels, conf, allTableNamesSorted, None)
+
   /** Feature vector of a LogicalPlan (the label is calculated elsewhere):
     * Left-side relations (1-hot)
     * Left-side est. card.
     * Right-side relations (1-hot)
     * Right-side est. card.
     * Trajectory's final plan's all relations (1-hot)
+    * Physical join type (1-hot)
+    *
+    * It is ok to pass a unary node in as "plan", such as a Project, in which case this function
+    * just traverses downward to find the first Join node.
     * */
   def featurize(plan: LogicalPlan,
                 rootRelsOneHot: Array[Float],
                 conf: SQLConf,
-                allTableNamesSorted: Seq[String]): Array[Float] = {
-    val result = findJoinSides(plan)
+                allTableNamesSorted: Seq[String],
+                joinAlgorithm: Option[JoinAlgorithm] = None): Array[Float] = plan match {
+    case j: Join =>
+      val result = findJoinSides(plan)
+        val (left, right) = result.get
+        val leftVisibleRels = left.collectLeaves().flatMap(_.baseTableName)
+        val rightVisibleRels = right.collectLeaves().flatMap(_.baseTableName)
 
-    if (result.isDefined) {
-      val (left, right) = result.get
-      val leftVisibleRels = left.collectLeaves().flatMap(_.baseTableName)
-      val rightVisibleRels = right.collectLeaves().flatMap(_.baseTableName)
+        // Which relations are present?
+        val leftOneHot = leafRelationsToOneHot(left.collectLeaves(), allTableNamesSorted)
+        val rightOneHot = leafRelationsToOneHot(right.collectLeaves(), allTableNamesSorted)
 
-      // Which relations are present?
-//      val leftOneHot = relNamesToOneHot(leftVisibleRels, allTableNamesSorted)
-//      val rightOneHot = relNamesToOneHot(rightVisibleRels, allTableNamesSorted)
-      val leftOneHot = leafRelationsToOneHot(left.collectLeaves(), allTableNamesSorted)
-      val rightOneHot = leafRelationsToOneHot(right.collectLeaves(), allTableNamesSorted)
+        // Each side's estimated cardinality?
+        val leftEstCard = left.stats.rowCount.get.toFloat
+        val rightEstCard = right.stats.rowCount.get.toFloat
+        logInfo(s"est cards $leftEstCard ${left.stats} $rightEstCard ${right.stats}")
+        logInfo(s"left $left right $right")
+        assert(leftEstCard > 0)
+        assert(rightEstCard > 0)
 
-      // Each side's estimated cardinality?
-      val leftEstCard = left.stats.rowCount.get.toFloat
-      val rightEstCard = right.stats.rowCount.get.toFloat
-      logInfo(s"est cards $leftEstCard ${left.stats} $rightEstCard ${right.stats}")
-      logInfo(s"left $left right $right")
-      assert(leftEstCard > 0)
-      assert(rightEstCard > 0)
+        // Physical join type.
+        val joinAlgo = if (joinAlgorithm.isEmpty) {
+          plan.asInstanceOf[Join].joinAlgorithm.get
+        } else {
+          joinAlgorithm.get
+        }
+        val joinAlgoIdx = JoinReorderDP.allJoinAlgorithms.indexOf(joinAlgo)
+        assert(joinAlgoIdx >= 0)
+        val joinAlgoOneHot = ArrayBuffer.fill(JoinReorderDP.allJoinAlgorithms.size)(0f)
+        joinAlgoOneHot(joinAlgoIdx) = 1f
 
-      val featureVector = (leftOneHot :+ leftEstCard) ++
-        (rightOneHot :+ rightEstCard) ++
-        rootRelsOneHot
+        // Concatenate to get final feat vec.
+        val featureVector = (leftOneHot :+ leftEstCard) ++
+          (rightOneHot :+ rightEstCard) ++
+          rootRelsOneHot ++
+          joinAlgoOneHot
 
-      // For debugging.
-      logInfo(s"features $featureVector")
-      logInfo(s"left Rels $leftVisibleRels OneHot $leftOneHot card $leftEstCard")
-      logInfo(s"right Rels $rightVisibleRels OneHot $rightOneHot card $rightEstCard")
-      logInfo(s"left leaves idx ${left.collectLeaves().map(_.disambiguationIndex)}")
-      logInfo(s"right leaves idx ${right.collectLeaves().map(_.disambiguationIndex)}")
-      logInfo(s"root rels $rootRelsOneHot")
+        // For debugging.
+        logInfo(s"features $featureVector")
+        logInfo(s"left Rels $leftVisibleRels OneHot $leftOneHot (size ${leftOneHot.length}) card $leftEstCard")
+        logInfo(s"right Rels $rightVisibleRels OneHot $rightOneHot (size ${rightOneHot.length}) card $rightEstCard")
+        logInfo(s"left leaves idx ${left.collectLeaves().map(_.disambiguationIndex)}")
+        logInfo(s"right leaves idx ${right.collectLeaves().map(_.disambiguationIndex)}")
+        logInfo(s"root rels $rootRelsOneHot (size ${rootRelsOneHot.length}")
+        logInfo(s"joinAlgo $joinAlgoOneHot (size ${joinAlgoOneHot.length})")
 
-      featureVector
-    } else {
-      // This can be reached for, say, a leaf Project-Filter-Relation block -- a singleton relation.
-      // The NN does not need to worry about singleton base relations.
-      Array.empty
-    }
+        featureVector
+    case u if u.children.size == 1 =>
+      featurize(plan.children.head, rootRelsOneHot, conf, allTableNamesSorted, joinAlgorithm)
+    case _ => Array.empty
   }
 
   /** Assumes "plan" is an optimal plan from some DP table.  Recursively collect training data. */
@@ -405,6 +425,8 @@ object JoinReorderDP extends PredicateHelper with Logging {
         var bestRight: JoinPlan = null
         var newJoin: JoinPlan = null
 
+        val joinAlgs = ArrayBuffer.empty[JoinAlgorithm]
+
         while (items.length > 1) {
           candidates.clear()
           featureBatch.clear()
@@ -413,33 +435,11 @@ object JoinReorderDP extends PredicateHelper with Logging {
           bestRight = null
           newJoin = null
 
-//          for (i <- items.indices) {
-//            for (j <- items.indices) {
-//              buildJoin(items(i), items(j), conf, conditions, topOutputSet, filters) match {
-//                case join@Some(newJoinPlan) =>
-//                  val featVec = LearningOptimizer.featurize(
-//                    newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
-//                  val predictedCost = LearningOptimizer.infer(featVec)
-//
-//                  logWarning(s"predicted cost $predictedCost, plan considered $newJoinPlan")
-//                  assert(predictedCost >= Float.MinValue && predictedCost <= Float.MaxValue)
-//
-//                  if (predictedCost < bestScore) {
-//                    newJoin = join
-//                    bestScore = predictedCost
-//                    bestLeft = items(i)
-//                    bestRight = items(j)
-//                  }
-//
-//                case None =>
-//              }
-//
-//            }
-//          }
-
           // Collect all score-able candidates.
           for (i <- items.indices) {
-            for (j <- (i + 1) until items.length) {
+//            for (j <- (i + 1) until items.length) {
+            for (j <- items.indices) {
+              // TODO: fix this hack. copy() here because annotateJoinAlgorithm() messes things.
               val l = items(i)
               val r = items(j)
               val leftBase = l.plan.collectLeaves().flatMap(_.baseTableName)
@@ -447,11 +447,16 @@ object JoinReorderDP extends PredicateHelper with Logging {
               // Let's not do self-joins (i != j can still mean same base relation).
               if (leftBase != rightBase) {
                 buildJoin(l, r, conf, conditions, topOutputSet, filters) match {
-                  case join@Some(newJoinPlan) =>
-                    val featVec = LearningOptimizer.featurize(
-                      newJoinPlan.plan, rootRelsOneHot, conf, allTableNamesSorted)
-                    featureBatch.append(featVec)
-                    candidates.append((newJoinPlan, i, j))
+                  case Some(newJoinPlan) =>
+                    allJoinAlgorithmsToInfer.foreach { joinAlgo =>
+                      val p = newJoinPlan.copy()
+                      p.annotateJoinAlgorithm(joinAlgo, toTree = false)  // Don't tag underlying
+                      logInfo(s"[infer] ${p.joinAlgorithm.get}; ${p.plan.collect{case j: Join => j.joinAlgorithm}}")
+                      val featVec = LearningOptimizer.featurize(
+                        p.plan, rootRelsOneHot, conf, allTableNamesSorted, Some(joinAlgo))
+                      featureBatch.append(featVec)
+                      candidates.append((p, i, j))
+                    }
                   case None =>
                 }
               }
@@ -459,6 +464,8 @@ object JoinReorderDP extends PredicateHelper with Logging {
           }
           // Invoke neural net once.
           val candidateScores = LearningOptimizer.infer(featureBatch.toArray)
+          logInfo(s"candidates ${featureBatch.map(_.mkString(",")).mkString("\n")}")
+          logInfo(s"scores ${candidateScores.mkString("; ")}")
           // Choose plan with least predicted cost.
           var bestLeftIdx = -1
           var bestRightIdx = -1
@@ -472,7 +479,10 @@ object JoinReorderDP extends PredicateHelper with Logging {
           }
           assert(bestLeftIdx != -1 && bestRightIdx != -1)
 
-          logInfo(s"adding join $newJoin into items")
+          // Needs to permanently tag the join algorithm.
+          newJoin.propagateJoinAlgorithm()
+
+          logInfo(s"adding join (alg ${newJoin.joinAlgorithm}; ${newJoin.plan.collect{case j: Join => j.joinAlgorithm.get}}; score $bestScore) : $newJoin")
 
           bestLeft = items(bestLeftIdx)
           bestRight = items(bestRightIdx)
@@ -481,7 +491,6 @@ object JoinReorderDP extends PredicateHelper with Logging {
           items.append(newJoin)
         }
 
-
         val finalPlanAnalyticalCost = (items.head.planCost + items.head.rootCost(conf)).combine()
 //        val finalPlanAnalyticalCost = items.head.planCost.combine()
         logInfo(s"final nn plan: plan cost $finalPlanAnalyticalCost root cost ${items.head.rootCost(conf).combine()}")
@@ -489,6 +498,10 @@ object JoinReorderDP extends PredicateHelper with Logging {
           LearningOptimizer.featurize(items.head.plan, rootRelsOneHot, conf, allTableNamesSorted)))(0)
         val diff = (predictedCostFinal - finalPlanAnalyticalCost) / finalPlanAnalyticalCost * 100
         logWarning(s"produced plan: analytical cost $finalPlanAnalyticalCost predicted $predictedCostFinal diff% $diff")
+        logWarning(s"  produced plan algo: ${items.head.joinAlgorithm};")
+
+        assert(items.head.joinAlgorithm.isDefined)
+        logInfo(s"produced plan all algs: ${items.head.plan.collect { case j: Join => j.joinAlgorithm }.mkString(",")}")
         (items.head.plan, finalPlanAnalyticalCost)
       }
 
@@ -603,16 +616,10 @@ object JoinReorderDP extends PredicateHelper with Logging {
 
     logInfo(s"queryGraphRels $queryGraphRels")
     logInfo(s"allTables ${allTableNamesSorted}")
-//    maps.foreach { ()}
-//    ()
   }
 
-  //  val file = new File(canonicalFilename)
-  //  val bw = new BufferedWriter(new FileWriter(file))
-  //  bw.write(text)
-  //  bw.close()
-
   val allJoinAlgorithms: Seq[JoinAlgorithm] = HashJoin :: SortMergeJoin :: NestedLoopJoin :: Nil
+  val allJoinAlgorithmsToInfer: Seq[JoinAlgorithm] = HashJoin :: SortMergeJoin :: Nil // :: NestedLoopJoin :: Nil
 
   /** Find all possible plans at the next level, based on existing levels. */
   private def searchLevel(
@@ -828,14 +835,20 @@ object JoinReorderDP extends PredicateHelper with Logging {
     var joinAlgorithm: Option[JoinAlgorithm] = None
 
     /** Attach an algorithm type to both this class (JoinPlan) and the underlying Join node. */
-    def annotateJoinAlgorithm(joinAlgorithm: JoinAlgorithm): Unit = {
+    def annotateJoinAlgorithm(joinAlgorithm: JoinAlgorithm, toTree: Boolean = true): Unit = {
       this.joinAlgorithm = Some(joinAlgorithm)
+      if (toTree) {
+        propagateJoinAlgorithm()
+      }
+    }
+
+    def propagateJoinAlgorithm(): Unit = {
+      assert(joinAlgorithm.isDefined)
       var joinNode = plan
       if (plan.isInstanceOf[Project]) {
         joinNode = plan.children.head
       }
       assert(joinNode.isInstanceOf[Join])
-//      assert(joinNode.asInstanceOf[Join].joinAlgorithm.isEmpty)
       joinNode.asInstanceOf[Join].joinAlgorithm = this.joinAlgorithm
     }
 
